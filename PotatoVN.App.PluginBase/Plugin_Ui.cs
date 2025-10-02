@@ -1,5 +1,6 @@
 ﻿using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Data;
 using PotatoVN.App.PluginBase.Controls;
 using PotatoVN.App.PluginBase.Controls.Prefabs;
 using PotatoVN.App.PluginBase.Helper;
@@ -12,7 +13,22 @@ public partial class Plugin
     {
         StdStackPanel panel = new();
         panel.Children.Add(new UserControl1().WarpWithPanel());
-        panel.Children.Add(new Setting("设置标题", "这是一个设置", new ToggleSwitch()).WarpWithPanel());
+        panel.Children.Add(new StdSetting("设置标题", "这是一个设置",
+            AddToggleSwitch(_data, nameof(_data.TestBool))).WarpWithPanel());
         return panel;
+    }
+
+    private ToggleSwitch AddToggleSwitch(object source, string propName)
+    {
+        ToggleSwitch toggle = new();
+        Binding binding = new()
+        {
+            Source = source,
+            Path = new PropertyPath(propName),
+            Mode = BindingMode.TwoWay,
+            UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged
+        };
+        toggle.SetBinding(ToggleSwitch.IsOnProperty, binding);
+        return toggle;
     }
 }

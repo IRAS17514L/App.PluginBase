@@ -8,6 +8,8 @@
     <Nullable>enable</Nullable>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
     <EnableCoreFrameworkTracking>false</EnableCoreFrameworkTracking>
+    <!-- 要处理该警告需要用到.Net Preview的特性，等特性稳定（进入正式版）后再处理 -->
+    <NoWarn>MVVMTK0045</NoWarn>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="AngleSharp" Version="1.3.0" />

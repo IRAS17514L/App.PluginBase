@@ -3,9 +3,9 @@ using Microsoft.UI.Xaml.Controls;
 
 namespace PotatoVN.App.PluginBase.Controls.Prefabs
 {
-    public sealed class Setting : UserControl
+    public sealed class StdSetting : UserControl
     {
-        public Setting(string title, string description, FrameworkElement rightContent)
+        public StdSetting(string title, string description, FrameworkElement rightContent)
         {
             rightContent.HorizontalAlignment = HorizontalAlignment.Right;
 
