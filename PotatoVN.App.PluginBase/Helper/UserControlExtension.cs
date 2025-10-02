@@ -1,4 +1,5 @@
-﻿using Microsoft.UI.Xaml.Controls;
+﻿using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 using PotatoVN.App.PluginBase.Controls.Prefabs;
 
 namespace PotatoVN.App.PluginBase.Helper;
@@ -10,7 +11,7 @@ public static class UserControlExtension
     /// </summary>
     /// <param name="control"></param>
     /// <returns>被包裹后的控件</returns>
-    public static UserControl WarpWithPanel(this UserControl control)
+    public static UserControl WarpWithPanel(this UIElement control)
     {
         return new StdPanel(control);
     }

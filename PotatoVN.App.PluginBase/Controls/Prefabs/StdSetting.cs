@@ -5,22 +5,36 @@ namespace PotatoVN.App.PluginBase.Controls.Prefabs
 {
     public sealed class StdSetting : UserControl
     {
+        public string Title
+        {
+            get => _titleText.Text;
+            set => _titleText.Text = value;
+        }
+        public string Description
+        {
+            get => _descriptionText.Text;
+            set => _descriptionText.Text = value;
+        }
+        
+        private readonly TextBlock _titleText;
+        private readonly TextBlock _descriptionText;
+        
         public StdSetting(string title, string description, FrameworkElement rightContent)
         {
             rightContent.HorizontalAlignment = HorizontalAlignment.Right;
 
-            var titleText = new TextBlock { Text = title };
-            var descriptionText = new TextBlock
+            _titleText = new TextBlock { Text = title };
+            _descriptionText = new TextBlock
             {
                 Text = description,
                 TextWrapping = TextWrapping.Wrap
             };
-            TryApplyStyle(titleText, "BodyTextBlockStyle");
-            TryApplyStyle(descriptionText, "DescriptionTextStyle");
+            TryApplyStyle(_titleText, "BodyTextBlockStyle");
+            TryApplyStyle(_descriptionText, "DescriptionTextStyle");
 
             var leftStack = new StackPanel { Orientation = Orientation.Vertical };
-            leftStack.Children.Add(titleText);
-            leftStack.Children.Add(descriptionText);
+            leftStack.Children.Add(_titleText);
+            leftStack.Children.Add(_descriptionText);
 
             var root = new Grid();
             root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(8, GridUnitType.Star) });
