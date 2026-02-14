@@ -31,10 +31,11 @@
 
 这个方法会传入一个`IPotatoVnApi`接口的实例，它就是 HostApi。你需要在你的插件代码中找到一个合适的位置（例如，一个静态字段或单例属性）来保存这个 hostApi 对象的引用，以便在插件的生命周期内随时调用其提供的方法。
 
-PotatoVN本体中已经内置了`harmony`库的支持。因此，如果现有的API无法满足你的需求，你可以使用`harmony`库来修改PotatoVN的行为。PotatoVN的软件本体代码位于项目`PotatoVN/GalgameManager`下，其文档位于`PotatoVN/.kilocode/rules/project-info-galgamemanager.md`下，在使用`harmony`库进行修改时，建议你参考这些代码和文档以了解PotatoVN的内部结构和实现细节。
+PotatoVN本体中已经内置了`harmony`库的支持。因此，如果现有的API无法满足你的需求，你可以使用`harmony`库来修改PotatoVN的行为。PotatoVN的软件本体代码位于项目`PotatoVN/GalgameManager`下，其文档位于`PotatoVN/.kilocode/rules/project-info-galgamemanager.md`下，在使用`harmony`库进行修改时，建议你参考这些代码和文档以了解PotatoVN的内部结构和实现细节。注意：插件项目没有预装`harmony`库，你需要自己通过NuGet安装它。
 
 
 ## 其他目录
 * `doc/ui.md`：如果你的插件需要实现自定义的UI，请你阅读这个文档了解UI相关的开发细节。
 * `doc/dialog.md`：如果你的插件需要实现自定义的对话框，请你阅读这个文档了解对话框相关的开发细节。
 * `doc/data.md`：如果你的插件需要保存/读写自己的插件数据，请阅读这个文档。
+* `doc/parser.md`：如果你的插件需要实现一个游戏信息搜刮器，请阅读这个文档。

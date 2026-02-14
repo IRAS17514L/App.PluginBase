@@ -1,16 +1,15 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Net;
-using System.Net.Http;
-using System.Text;
-using System.Threading.Tasks;
-using AngleSharp;
-using AngleSharp.Dom;
-using GalgameManager.Contracts.Phrase;
-using GalgameManager.Enums;
-using GalgameManager.Models;
+﻿# 搜刮器开发指南
 
+如果你需要开发一个新的搜刮器，请你让你的插件主类实现`IParserProvider`接口。
+
+开发时，需要注意以下注意事项：
+* 你需要确定一个唯一的ParserId（int），建议你使用随机数生成器生成一个6位数证书，避免和别的插件冲突。
+* `IGalInfoPhraser`的GetGalgameInfo要求返回一个**全新**的Galgame对象，而不是在传入的galgame对象上修改后返回。
+
+---
+以下为一个搜刮器示例：
+```csharp
+//using ...
 namespace PotatoVN.App.PluginBase;
 
 public class GetChuParser : IGalInfoPhraser
@@ -73,11 +72,6 @@ public class GetChuParser : IGalInfoPhraser
             result.ImageUrl = data.CoverImageUrl;
             result.RssType = GetPhraseType();
             result.Id = galgame.Id;
-            
-            // 在这里可以添加对 Staff 信息的进一步处理，例如填充到某个属性中
-            // 示例：
-            // var staffInfo = data.Staff.Select(s => $"{s.Role}: {string.Join(", ", s.Members)}");
-            // result.Staff.Value = string.Join("\n", staffInfo); // 假设Staff是字符串属性
 
             return result;
         }
@@ -157,71 +151,6 @@ public class GetChuParser : IGalInfoPhraser
         }
         return src;
     }
-
-    /// <summary>
-    /// 3 & 4. 提取制作员工和声优列表。
-    /// </summary>
-    private List<(string Role, List<string> Members)> ExtractStaffAndCVs(IDocument document)
-    {
-        var staffList = new List<(string Role, List<string> Members)>();
-        var knownRoles = new HashSet<string> { "原画", "シナリオ", "音楽" };
-
-        // --- 提取员工信息 ---
-        // 直接在 #soft_table 下查找所有行，以适应新版HTML结构
-        var staffRows = document.QuerySelectorAll("#soft_table tr");
-        foreach (var row in staffRows)
-        {
-            var cells = row.QuerySelectorAll("td").ToList();
-            if (cells.Count < 2) continue;
-
-            string role = cells[0].TextContent.Trim().Replace("：", "");
-            if (knownRoles.Contains(role))
-            {
-                var members = cells[1].QuerySelectorAll("a")
-                                      .Select(a => a.TextContent.Trim())
-                                      .Where(name => !string.IsNullOrEmpty(name))
-                                      .ToList();
-                if (members.Any())
-                {
-                    staffList.Add((role, members));
-                }
-            }
-        }
-
-        // --- 提取声优 (CV) 信息 ---
-        var cvs = new List<string>();
-        // 查找 "キャラクター" 标题，注意其前面可能有一个特殊的不间断空格
-        var characterTitleDiv = document.QuerySelectorAll("div.tabletitle")
-                                        .FirstOrDefault(el => el.TextContent.Trim() == "キャラクター" || el.TextContent.Trim() == " キャラクター");
-        
-        if (characterTitleDiv != null)
-        {
-            var characterTable = characterTitleDiv.NextElementSibling;
-            if (characterTable != null && characterTable.TagName.Equals("TABLE", StringComparison.OrdinalIgnoreCase))
-            {
-                var charaNameHeaders = characterTable.QuerySelectorAll("h2.chara-name");
-                foreach (var header in charaNameHeaders)
-                {
-                    // 直接获取 h2 的文本内容
-                    string text = header.TextContent;
-                    int cvIndex = text.IndexOf("CV：", StringComparison.Ordinal);
-                    if (cvIndex > -1)
-                    {
-                        string cvName = text.Substring(cvIndex + 3).Trim();
-                        if (!string.IsNullOrEmpty(cvName))
-                        {
-                            cvs.Add(cvName);
-                        }
-                    }
-                }
-            }
-        }
-
-        if (cvs.Any())
-        {
-            staffList.Add(("声優", cvs.Distinct().ToList()));
-        }
-
-        return staffList;
-    }
 }
+
+```

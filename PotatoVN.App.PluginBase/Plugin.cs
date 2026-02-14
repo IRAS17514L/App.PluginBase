@@ -3,26 +3,29 @@ using System.Threading.Tasks;
 using GalgameManager.WinApp.Base.Contracts;
 using GalgameManager.WinApp.Base.Contracts.PluginUi;
 using GalgameManager.WinApp.Base.Models;
+using PotatoVN.App.PluginBase.Helper;
 using PotatoVN.App.PluginBase.Models;
 
 namespace PotatoVN.App.PluginBase
 {
-    public partial class Plugin : IPlugin, IParserProvider, IPluginSetting
+    public partial class Plugin : IPlugin, IPluginSetting
     {
         private IPotatoVnApi _hostApi = null!;
         private PluginData _data = new ();
         
         public PluginInfo Info { get; } = new()
         {
-            Id = new Guid("78f4ca27-7ffb-43b2-a5a5-b5d880db096d"),
-            Name = "GetChu搜刮器",
-            Description = "让你可以从getchu搜刮游戏信息！\n这是第二行描述",
+            //todo: 请务必随机生成一个新的Guid，切勿使用这个示例Guid，否则可能会和其他使用了同一Guid的插件发生冲突
+            Id = new Guid("78f4ca27-7ffb-43b2-a5a5-111111db096d"), 
+            Name = "插件示例",
+            Description = "这是一个示范插件！\n这是第二行描述",
         };
 
         public async Task InitializeAsync(IPotatoVnApi hostApi)
         {
             _hostApi = hostApi;
-            XamlResourceLocatorFactory.packagePath = _hostApi.GetPluginPath();
+            XamlResourceLocatorFactory.PackagePath = _hostApi.GetPluginPath();
+            PluginLocalization.Initialize(hostApi); //初始化插件多国语言支持，如果你的插件不需要支持多语言，可以不调用这个方法，直接在代码里写死字符串即可。
             var dataJson = await _hostApi.GetDataAsync();
             if (!string.IsNullOrWhiteSpace(dataJson))
             {

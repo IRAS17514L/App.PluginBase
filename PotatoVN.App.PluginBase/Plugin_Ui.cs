@@ -13,10 +13,10 @@ public partial class Plugin
     {
         StdStackPanel panel = new();
         panel.Children.Add(new UserControl1().WarpWithPanel());
-        panel.Children.Add(new StdSetting("设置标题", "这是一个设置",
+        panel.Children.Add(new StdSetting("SettingTitle".GetLoc(), "SettingDescription".GetLoc(),
             AddToggleSwitch(_data, nameof(_data.TestBool))).WarpWithPanel());
         StdAccountPanel accountPanel = new StdAccountPanel("title", "userName", "Description",
-            new Button().WarpWithPanel());
+            new Button(){Content = "Login".GetLoc()}.WarpWithPanel());
         panel.Children.Add(accountPanel);
         return panel;
     }

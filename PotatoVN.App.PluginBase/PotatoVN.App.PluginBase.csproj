@@ -28,6 +28,17 @@
   <ItemGroup>
     <Resource Remove="artifacts\plugin.pvnplugin\PotatoVN.App.PluginBase\Controls\UserControl1.xaml" />
   </ItemGroup>
+  <ItemGroup>
+    <None Update="Strings\en-US.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="Strings\ja-JP.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="Strings\zh-CN.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
 
 
     <!--
