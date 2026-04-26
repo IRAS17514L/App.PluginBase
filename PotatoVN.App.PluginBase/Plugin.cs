@@ -39,6 +39,7 @@ namespace PotatoVN.App.PluginBase
                 }
             }
             _data.PropertyChanged += (_, _) => SaveData(); // 当Observable属性变化时自动保存数据，对于普通属性请手动调用SaveData
+            InitUi();
         }
         
         private void SaveData()
