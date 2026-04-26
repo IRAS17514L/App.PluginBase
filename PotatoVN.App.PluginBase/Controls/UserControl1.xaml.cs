@@ -10,20 +10,9 @@ namespace PotatoVN.App.PluginBase.Controls
 {
     public sealed partial class UserControl1 : UserControl
     {
-        public UserControl1()
+        public UserControl1()       
         {
-            PluginInitializeComponent();
-        }
-
-        private void PluginInitializeComponent()
-        {
-            if (_contentLoaded)
-                return;
-
-            _contentLoaded = true;
-
-            var resourceLocator = XamlResourceLocatorFactory.Create();
-            Application.LoadComponent(this, resourceLocator, ComponentResourceLocation.Application);
+            XamlResourceLocatorFactory.PluginControlInit(ref _contentLoaded, this);
         }
 
         private void PluginButton_Click(object sender, RoutedEventArgs e)

@@ -1,5 +1,7 @@
 ﻿using System;
 using System.Runtime.CompilerServices;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls.Primitives;
 
 namespace PotatoVN.App.PluginBase
 {
@@ -23,6 +25,21 @@ namespace PotatoVN.App.PluginBase
             var i = callerFilePath.LastIndexOf(PackageName, StringComparison.Ordinal);
             var componentPath = callerFilePath[i..^3];
             return new Uri($"ms-appx:///{PackagePath}\\{componentPath}");
+        }
+        
+        /// <summary>
+        /// 使用它来代替WinUI3自己生成的InitializeComponent()（参考UserControl1）
+        /// </summary>
+        /// <param name="contentLoaded"></param>
+        /// <param name="ctrl"></param>
+        /// <param name="callerFilePath"></param>
+        internal static void PluginControlInit(ref bool contentLoaded, object ctrl,
+            [CallerFilePath] string callerFilePath = "")
+        {
+            if (contentLoaded) return;
+            contentLoaded = true;
+            var resourceLocator = Create(callerFilePath);
+            Application.LoadComponent(ctrl, resourceLocator, ComponentResourceLocation.Application);
         }
     }
 }
