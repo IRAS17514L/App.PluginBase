@@ -24,7 +24,7 @@ public partial class Plugin
            FluentGlyph = "&#xE709;",
         }, () =>
         {
-            _hostApi.Info(InfoBarSeverity.Success, "HelloWorld!");
+            _hostApi.NavigateTo(typeof(ExamplePage), "Example Page");
             return Task.CompletedTask;
         });
         _uiInit = true;

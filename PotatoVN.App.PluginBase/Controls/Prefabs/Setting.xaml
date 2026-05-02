@@ -11,9 +11,10 @@
         <StackPanel Orientation="Vertical">
             <TextBlock Text="{x:Bind Title, Mode=OneWay}"/>
             <TextBlock x:Name="DescriptionTextBlock" 
-                       FontWeight="Normal" FontSize="12" Opacity="0.6"
+                       Style="{ThemeResource DescriptionTextStyle}"
                        Text="{x:Bind Description, Mode=OneWay}"
                        TextWrapping="Wrap"/>
+            <!-- <TextBlock Text="12345"/> -->
         </StackPanel>
         <ContentPresenter x:Name="ContentArea" RelativePanel.AlignRightWithPanel="True" VerticalAlignment="Center"/>
     </RelativePanel>

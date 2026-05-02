@@ -64,3 +64,14 @@ public FrameworkElement CreateSettingUi()
 
 ## UI注入软件
 PotatoVN提供了多种UI注入接口，允许插件将自定义UI注入到应用的不同位置。你可以在应用公开库的`Contracts/PluginUi`目录下找到这些接口的定义。如果你需要的UI注入位置没有接口，你可以阅读软件本体的代码，并使用`harmony`库来创建新的UI注入点。
+
+## 与宿主保持相同的风格
+为了让插件UI与宿主应用保持一致的风格，建议使用PotatoVN提供的预设Style：Controls/Styles目录下有以下预设style，请务必考虑使用它们：
+* FontSize：定义了应用中使用的字体大小。
+* TextBlock： 定义了常见的TextBlock样式。
+* Thickness：定义了各种常用的Margin和Padding值。
+
+使用示例：
+```xaml
+<TextBlock Style="{ThemeResource DescriptionTextStyle}" Text="这是一段描述文本"/>
+```

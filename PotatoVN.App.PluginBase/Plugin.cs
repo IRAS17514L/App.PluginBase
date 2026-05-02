@@ -1,4 +1,5 @@
 using System;
+using System.Threading;
 using System.Threading.Tasks;
 using GalgameManager.WinApp.Base.Contracts;
 using GalgameManager.WinApp.Base.Contracts.PluginUi;
@@ -10,6 +11,7 @@ namespace PotatoVN.App.PluginBase
 {
     public partial class Plugin : IPlugin, IPluginSetting
     {
+        public static IPotatoVnApi HostApi { get; private set; } = null!;
         private IPotatoVnApi _hostApi = null!;
         private PluginData _data = new ();
         
@@ -24,8 +26,10 @@ namespace PotatoVN.App.PluginBase
         public async Task InitializeAsync(IPotatoVnApi hostApi)
         {
             _hostApi = hostApi;
+            HostApi = hostApi;
             XamlResourceLocatorFactory.PackagePath = _hostApi.GetPluginPath();
             PluginLocalization.Initialize(hostApi); //初始化插件多国语言支持，如果你的插件不需要支持多语言，可以不调用这个方法，直接在代码里写死字符串即可。
+            ResourceLoader.Initialize(); //初始化XAML字典加载器，资源用法请参考ResourceLoader类的注释
             var dataJson = await _hostApi.GetDataAsync();
             if (!string.IsNullOrWhiteSpace(dataJson))
             {
@@ -40,6 +44,13 @@ namespace PotatoVN.App.PluginBase
             }
             _data.PropertyChanged += (_, _) => SaveData(); // 当Observable属性变化时自动保存数据，对于普通属性请手动调用SaveData
             InitUi();
+        }
+        
+        public Task OnUninstallAsync(bool deleteData, Action<TimeSpan> extendWaitHandler, CancellationToken cts)
+        {
+            if (cts.IsCancellationRequested) return Task.FromCanceled(cts);
+            ResourceLoader.Unload(); // 卸载XAML资源字典
+            return Task.CompletedTask;
         }
         
         private void SaveData()

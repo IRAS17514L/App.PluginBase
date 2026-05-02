@@ -27,6 +27,12 @@ namespace PotatoVN.App.PluginBase
             return new Uri($"ms-appx:///{PackagePath}\\{componentPath}");
         }
         
+        internal static Uri CreateFromRelativePath(string relativePath)
+        {
+            relativePath = relativePath.Replace('/', '\\').TrimStart('\\');
+            return new Uri($"ms-appx:///{PackagePath}\\{PackageName}\\{relativePath}");
+        }
+        
         /// <summary>
         /// 使用它来代替WinUI3自己生成的InitializeComponent()（参考UserControl1）
         /// </summary>
