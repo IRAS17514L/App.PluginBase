@@ -8,14 +8,20 @@
     xmlns:prefabs="using:PotatoVN.App.PluginBase.Controls.Prefabs"
     mc:Ignorable="d">
 
-    <StackPanel Spacing="10" Padding="20" HorizontalAlignment="Stretch" VerticalAlignment="Center">
-        <TextBlock FontSize="24" Text="大家好，我是插件514！" />
-        <TextBlock Text="这是一个来自外部DLL的用户控件。" />
-        <Button Content="Hello World!"/>
-        <prefabs:Setting Title="推荐用这个控件来当作设置控件" Description="这是该设置的描述">
-            <ToggleSwitch/>
-        </prefabs:Setting>
-        <Button x:Name="PluginButton" Content="点击我" Click="PluginButton_Click"/>
-        <TextBlock x:Name="StatusText" />
-    </StackPanel>
+    <prefabs:StdStackPanel HorizontalAlignment="Stretch" VerticalAlignment="Center"
+                           Margin="{ThemeResource SmallBottomMargin}">
+        <prefabs:Panel>
+            <StackPanel Spacing="10" Padding="20">
+                <TextBlock FontSize="24" Text="大家好，我是插件！" />
+                <TextBlock Text="这是一个来自外部DLL的用户控件。" />
+                <Button x:Name="Button" Content="Hello World!" Click="ButtonBase_OnClick"/>
+            </StackPanel>
+        </prefabs:Panel>
+        
+        <prefabs:Panel>
+            <prefabs:Setting Title="推荐用这个控件来当作设置控件" Description="这是该设置的描述">
+                <ToggleSwitch IsOn="{x:Bind _data.TestBool, Mode=TwoWay}"/>
+            </prefabs:Setting>
+        </prefabs:Panel>
+    </prefabs:StdStackPanel>
 </UserControl>

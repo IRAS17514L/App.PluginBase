@@ -22,9 +22,9 @@ namespace PotatoVN.App.PluginBase
         internal static Uri Create([CallerFilePath] string callerFilePath = "")
         {
             // This is not a foolproof solution, but it works well enough to get started
-            var i = callerFilePath.LastIndexOf(PackageName, StringComparison.Ordinal);
+            var i = callerFilePath.LastIndexOf("Stamped", StringComparison.Ordinal) + 8;
             var componentPath = callerFilePath[i..^3];
-            return new Uri($"ms-appx:///{PackagePath}\\{componentPath}");
+            return new Uri($"ms-appx:///{PackagePath}\\{PackageName}\\{componentPath}");
         }
         
         internal static Uri CreateFromRelativePath(string relativePath)

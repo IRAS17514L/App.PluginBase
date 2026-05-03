@@ -11,6 +11,117 @@
     <!-- 要处理该警告需要用到.Net Preview的特性，等特性稳定（进入正式版）后再处理 -->
     <NoWarn>MVVMTK0045</NoWarn>
   </PropertyGroup>
+
+  <PropertyGroup>
+    <PluginNamespaceToStamp>PotatoVN.App.PluginBase</PluginNamespaceToStamp>
+  </PropertyGroup>
+
+  <UsingTask TaskName="StampPluginNamespaceItems" TaskFactory="RoslynCodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <SourceFiles ParameterType="Microsoft.Build.Framework.ITaskItem[]" Required="true" />
+      <ProjectDirectory ParameterType="System.String" Required="true" />
+      <DestinationDirectory ParameterType="System.String" Required="true" />
+      <OldNamespace ParameterType="System.String" Required="true" />
+      <NewNamespace ParameterType="System.String" Required="true" />
+      <StampedFiles ParameterType="Microsoft.Build.Framework.ITaskItem[]" Output="true" />
+    </ParameterGroup>
+    <Task>
+      <Using Namespace="System" />
+      <Using Namespace="System.Collections.Generic" />
+      <Using Namespace="System.IO" />
+      <Using Namespace="System.Text" />
+      <Using Namespace="Microsoft.Build.Framework" />
+      <Using Namespace="Microsoft.Build.Utilities" />
+      <Code Type="Fragment" Language="cs"><![CDATA[
+var stampedFiles = new List<ITaskItem>();
+
+var projectRoot = Path.GetFullPath(ProjectDirectory);
+if (!projectRoot.EndsWith(Path.DirectorySeparatorChar.ToString()) && !projectRoot.EndsWith(Path.AltDirectorySeparatorChar.ToString()))
+{
+    projectRoot += Path.DirectorySeparatorChar;
+}
+
+var destinationRoot = Path.GetFullPath(DestinationDirectory);
+foreach (var sourceFile in SourceFiles)
+{
+    var sourcePath = sourceFile.GetMetadata("FullPath");
+    if (string.IsNullOrWhiteSpace(sourcePath))
+    {
+        sourcePath = sourceFile.ItemSpec;
+    }
+
+    sourcePath = Path.GetFullPath(sourcePath);
+    if (!sourcePath.StartsWith(projectRoot, StringComparison.OrdinalIgnoreCase))
+    {
+        Log.LogWarning($"Skipping namespace stamping for file outside project directory: {sourcePath}");
+        continue;
+    }
+
+    var relativePath = sourcePath.Substring(projectRoot.Length);
+    var destinationPath = Path.Combine(destinationRoot, relativePath);
+    var destinationParent = Path.GetDirectoryName(destinationPath);
+    if (!string.IsNullOrEmpty(destinationParent))
+    {
+        Directory.CreateDirectory(destinationParent);
+    }
+
+    var content = File.ReadAllText(sourcePath);
+    content = content.Replace(OldNamespace, NewNamespace);
+    File.WriteAllText(destinationPath, content, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+
+    var stampedFile = new TaskItem(destinationPath);
+    sourceFile.CopyMetadataTo(stampedFile);
+    stampedFile.SetMetadata("OriginalIdentity", sourceFile.ItemSpec);
+    stampedFile.SetMetadata("OriginalRelativePath", relativePath);
+    stampedFile.SetMetadata("Link", relativePath);
+    stampedFiles.Add(stampedFile);
+}
+
+StampedFiles = stampedFiles.ToArray();
+]]></Code>
+    </Task>
+  </UsingTask>
+
+  <Target Name="_StampPluginNamespace" BeforeTargets="MarkupCompilePass1;CoreCompile;CheckForDuplicatePageItems;AddProcessedXamlFilesToCopyLocal;AddXamlFilesToNugetPackage" Condition="'$(DesignTimeBuild)' != 'true'">
+    <PropertyGroup>
+      <_PluginStampedNamespace>$(PluginNamespaceToStamp).Stamped_$([System.Guid]::NewGuid().ToString(&quot;N&quot;))</_PluginStampedNamespace>
+      <_PluginStampRoot>$(IntermediateOutputPath)Stamped\</_PluginStampRoot>
+      <RootNamespace>$(_PluginStampedNamespace)</RootNamespace>
+    </PropertyGroup>
+
+    <ItemGroup>
+      <_PluginStampCompile Include="@(Compile)" Condition="'%(Compile.Extension)' == '.cs'" />
+      <_PluginStampPage Include="@(Page)" Condition="'%(Page.Extension)' == '.xaml'" />
+      <_PluginStampSource Include="@(_PluginStampCompile);@(_PluginStampPage)" />
+    </ItemGroup>
+
+    <RemoveDir Directories="$(_PluginStampRoot)" />
+
+    <StampPluginNamespaceItems SourceFiles="@(_PluginStampSource)"
+                               ProjectDirectory="$(MSBuildProjectDirectory)\"
+                               DestinationDirectory="$(_PluginStampRoot)"
+                               OldNamespace="$(PluginNamespaceToStamp)"
+                               NewNamespace="$(_PluginStampedNamespace)">
+      <Output TaskParameter="StampedFiles" ItemName="_PluginStampedFiles" />
+    </StampPluginNamespaceItems>
+
+    <ItemGroup>
+      <Compile Remove="@(_PluginStampCompile)" />
+      <Page Remove="@(_PluginStampPage)" />
+      <Resource Remove="@(_PluginStampPage)" />
+
+      <Compile Include="@(_PluginStampedFiles)" Condition="'%(_PluginStampedFiles.Extension)' == '.cs'" />
+      <Page Include="@(_PluginStampedFiles)" Condition="'%(_PluginStampedFiles.Extension)' == '.xaml'" />
+      <Resource Include="@(_PluginStampedFiles)" Condition="'%(_PluginStampedFiles.Extension)' == '.xaml'" />
+    </ItemGroup>
+
+    <Message Importance="High" Text="Plugin namespace stamped to: $(_PluginStampedNamespace)" />
+  </Target>
+
+  <Target Name="_DeleteGeneratedXamlTypeInfo" AfterTargets="CoreCompile" Condition="'$(DesignTimeBuild)' != 'true'">
+    <Delete Files="$(IntermediateOutputPath)XamlTypeInfo.g.cs" TreatErrorsAsWarnings="true" />
+  </Target>
+
   <ItemGroup>
     <None Remove="Controls\ExamplePage.xaml" />
   </ItemGroup>

@@ -11,6 +11,26 @@ PotatoVN 支持插件使用XAML定义UI（就像常规的WinUI控件那样），
 2. 插件项目保持 WinUI 类库配置，并启用 `<CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>`。 (默认模板已启用)
 3. 打包插件时要保留生成出来的 `.pri` 文件，以及 `程序集名/...` 这一整套编译后的 XAML 资源目录 （这也是模板默认启用的）。
 
+### 关于 namespace stamping
+
+WinUI 3 的 XAML 加载机制对命名空间比较敏感。如果多个插件都从同一个模板创建，并保留相同的 `PotatoVN.App.PluginBase` namespace，就可能在宿主进程内出现同名 XAML 控件加载冲突。
+
+为避免这个问题，模板在 MSBuild 阶段启用了 namespace stamping：编译前会把插件项目中的 `.cs` 和 `.xaml` 复制到 `obj/Stamped/`，并把 `PotatoVN.App.PluginBase` 替换为本次构建随机生成的 namespace。原始源码不会被修改，最终参与编译的是 `obj/Stamped/` 下的副本。
+
+这带来一个调试限制：调试器看到的运行时代码来自 `obj/Stamped/`，而不是你正在编辑的源文件，因此断点有时无法绑定或无法命中。遇到这种情况时，建议优先使用宿主提供的提示接口输出调试信息，例如：
+
+```csharp
+_hostApi.Info(InfoBarSeverity.Informational, msg: $"当前状态：{value}");
+```
+
+如果不在 `Plugin` 类中，也可以使用模板里保存的静态引用：
+
+```csharp
+Plugin.HostApi.Info(InfoBarSeverity.Informational, msg: "调试信息");
+```
+
+注意：不要在业务代码中引用 `obj/Stamped/` 或随机生成的 namespace；它们只是构建产物，每次构建都可能变化。
+
 以下为XAML描述UI的案例：
 ```xaml
 <?xml version="1.0" encoding="utf-8"?>

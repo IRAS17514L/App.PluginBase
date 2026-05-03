@@ -1,23 +1,25 @@
-using System.Globalization;
+using System;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Controls.Primitives;
+using PotatoVN.App.PluginBase.Models;
 
 // To learn more about WinUI, the WinUI project structure,
 // and more about our project templates, see: http://aka.ms/winui-project-info.
-
 namespace PotatoVN.App.PluginBase.Controls
 {
     public sealed partial class UserControl1 : UserControl
     {
-        public UserControl1()       
+        private PluginData _data;
+        
+        public UserControl1(PluginData data)
         {
             XamlResourceLocatorFactory.PluginControlInit(ref _contentLoaded, this);
+            _data = data;
         }
 
-        private void PluginButton_Click(object sender, RoutedEventArgs e)
+        private void ButtonBase_OnClick(object sender, RoutedEventArgs e)
         {
-            StatusText.Text = "插件按钮在 " + System.DateTime.Now.ToString(CultureInfo.InvariantCulture) + " 被点击了！";
+            Button.Content = $"Button clicked at {DateTime.Now.ToShortTimeString()}!";
         }
     }
 }
