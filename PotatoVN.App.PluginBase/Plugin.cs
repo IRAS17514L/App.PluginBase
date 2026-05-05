@@ -7,6 +7,7 @@ using GalgameManager.WinApp.Base.Models;
 using PotatoVN.App.PluginBase.Helper;
 using PotatoVN.App.PluginBase.Models;
 
+//todo: 请修改PotatoVN.App.PluginBase/PotatoVN.App.PluginBase.csproj中的AssemblyName
 namespace PotatoVN.App.PluginBase
 {
     public partial class Plugin : IPlugin, IPluginSetting

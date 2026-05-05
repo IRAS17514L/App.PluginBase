@@ -33,6 +33,12 @@
 
 PotatoVN本体中已经内置了`harmony`库的支持。因此，如果现有的API无法满足你的需求，你可以使用`harmony`库来修改PotatoVN的行为。PotatoVN的软件本体代码位于项目`PotatoVN/GalgameManager`下，其文档位于`PotatoVN/.kilocode/rules/project-info-galgamemanager.md`下，在使用`harmony`库进行修改时，建议你参考这些代码和文档以了解PotatoVN的内部结构和实现细节。注意：插件项目没有预装`harmony`库，你需要自己通过NuGet安装它。
 
+## 完成开发
+
+在你完成第一个任务（也就是用户交给你的任务）之前，请务必完成写在`Plugin.cs`里的TODO事项。完成todo后，你可以把那些TODO注释给删除掉。
+
+此外，请你修改仓库根目录下的README.md，把它里面的脚手架内容删掉，改为和当前插件一致的README。
+
 
 ## 其他目录
 * `doc/ui.md`：如果你的插件需要实现自定义的UI，请你阅读这个文档了解UI相关的开发细节。
