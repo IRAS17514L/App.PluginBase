@@ -191,6 +191,7 @@ StampedFiles = stampedFiles.ToArray();
 
 		<!-- 共享程序集黑名单：在临时目录中删除这些 DLL -->
 		<ItemGroup>
+			<_PluginBlacklistFiles Include="$(_PluginTempDir)0Harmony.dll" />
 			<_PluginBlacklistFiles Include="$(_PluginTempDir)Microsoft.WinUI.dll" />
 			<_PluginBlacklistFiles Include="$(_PluginTempDir)Microsoft.WindowsAppRuntime.Bootstrap.Net.dll" />
 			<_PluginBlacklistFiles Include="$(_PluginTempDir)Microsoft.Windows.SDK.NET.dll" />
