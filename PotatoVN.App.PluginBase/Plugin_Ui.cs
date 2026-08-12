@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Net.Http;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using AngleSharp.Html.Parser;
 using GalgameManager.Enums;
@@ -21,6 +22,14 @@ namespace PotatoVN.App.PluginBase;
 public partial class Plugin : IGalgamePageRightPanel
 {
     private const string YmgalBase = "https://www.ymgal.games";
+    private static readonly string[] Known2DfanDomains =
+    [
+        "https://2dfan.com",
+        "https://2dfdf.de",
+        "https://2dfmax.top",
+        "https://fan2d.top",
+        "https://acgfan.top",
+    ];
     private static readonly HttpClient Http = CreateHttpClient();
     private string _currentSource = "2dfan";
     private ToggleButton? _source2dfan;
@@ -42,24 +51,38 @@ public partial class Plugin : IGalgamePageRightPanel
             Data.DefaultSource = sourceBox.SelectedIndex switch { 1 => "2dfan", 2 => "ymgal", _ => "auto" };
         };
 
-        TextBox domainBox = new()
+        ComboBox domainBox = new() { MinWidth = 200 };
+        foreach (string candidate in Known2DfanDomains)
+            domainBox.Items.Add(candidate);
+        if (!Known2DfanDomains.Contains(Data.Domain))
+            domainBox.Items.Add(Data.Domain);
+        domainBox.SelectedItem = Data.Domain;
+        domainBox.SelectionChanged += (_, _) =>
         {
-            Text = Data.Domain,
-            MinWidth = 200,
+            if (domainBox.SelectedItem is string selected && !string.IsNullOrEmpty(selected))
+                Data.Domain = selected;
         };
-        domainBox.LostFocus += (_, _) =>
+
+        Button detectButton = new() { Content = "自动检测可用域名" };
+        detectButton.Click += async (_, _) =>
         {
-            if (Uri.TryCreate(domainBox.Text, UriKind.Absolute, out var uri) &&
-                (uri.Scheme == "http" || uri.Scheme == "https"))
+            detectButton.IsEnabled = false;
+            string? found = await ProbeAvailableDomainAsync();
+            detectButton.IsEnabled = true;
+            if (found is null)
             {
-                string normalized = uri.ToString().TrimEnd('/');
-                if (Data.Domain != normalized) Data.Domain = normalized;
+                Plugin.HostApi.Info(Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning,
+                    "未检测到可用的 2DFan 域名，请检查网络");
+                return;
             }
-            else
-            {
-                domainBox.Text = Data.Domain;
-            }
+            Data.Domain = found;
+            domainBox.SelectedItem = found;
+            Plugin.HostApi.Info(Microsoft.UI.Xaml.Controls.InfoBarSeverity.Success,
+                $"已切换到可用域名：{found}");
         };
+        StackPanel domainStack = new() { Spacing = 6 };
+        domainStack.Children.Add(domainBox);
+        domainStack.Children.Add(detectButton);
 
         Button clearButton = new() { Content = "清除已保存的关联" };
         clearButton.Click += (_, _) => Data.TopicUrlMap.Clear();
@@ -68,7 +91,7 @@ public partial class Plugin : IGalgamePageRightPanel
         panel.Children.Add(new StdSetting("默认攻略来源",
             "自动：游戏有月幕档案编号时用月幕，否则用 2DFan。可在游戏页内手动切换单个游戏的来源。", sourceBox));
         panel.Children.Add(new StdSetting("2DFan 域名",
-            "官方域 2dfan.com 在中国大陆无法访问，可切换备用域（2dfdf.de / 2dfmax.top）", domainBox));
+            "官方域 2dfan.com 在中国大陆无法访问，域名失效时可点“自动检测”选择可用备用域", domainStack));
         panel.Children.Add(new StdSetting("已保存的攻略关联",
             $"共 {Data.TopicUrlMap.Count} 个游戏已关联攻略页，清除后需重新检索", clearButton));
         return panel;
@@ -495,6 +518,25 @@ public partial class Plugin : IGalgamePageRightPanel
         if (Uri.TryCreate(url, UriKind.Absolute, out var uri))
             return $"{Data.Domain}{uri.PathAndQuery}";
         return url;
+    }
+
+    private static async Task<string?> ProbeAvailableDomainAsync()
+    {
+        foreach (string domain in Known2DfanDomains)
+        {
+            try
+            {
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+                using var response = await Http.GetAsync($"{domain}/subjects",
+                    HttpCompletionOption.ResponseHeadersRead, cts.Token);
+                if (response.IsSuccessStatusCode) return domain;
+            }
+            catch
+            {
+                // 尝试下一个域名
+            }
+        }
+        return null;
     }
 
     private static HttpClient CreateHttpClient()
