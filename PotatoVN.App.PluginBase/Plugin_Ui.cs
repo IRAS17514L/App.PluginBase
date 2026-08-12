@@ -145,9 +145,24 @@ public partial class Plugin : IGalgamePageRightPanel
         try
         {
             if (_currentSource == "ymgal")
-                await YmgalAsync(game, content, status);
+            {
+                try
+                {
+                    await YmgalAsync(game, content, status);
+                }
+                catch (Exception e)
+                {
+                    // 月幕不可用时自动回退到 2DFan，避免玩家无攻略可用
+                    _currentSource = "2dfan";
+                    UpdateSourceToggleState();
+                    status.Text = $"月幕加载失败，已自动切换 2DFan：{e.Message}";
+                    await Df2anAsync(game, content, status);
+                }
+            }
             else
+            {
                 await Df2anAsync(game, content, status);
+            }
         }
         finally
         {
@@ -322,39 +337,64 @@ public partial class Plugin : IGalgamePageRightPanel
                 $"{YmgalBase}/search?keyword={Uri.EscapeDataString(BuildQuery(game))}");
             return;
         }
-        status.Text = "正在加载月幕档案…";
-        string url = $"{YmgalBase}/ga{gid}";
-        try
+        status.Text = "正在加载月幕文章列表…";
+        List<(string Title, string Url)> articles = await GetYmgalArticlesAsync(gid);
+        if (articles.Count == 0)
         {
-            string html = await GetAsync(url);
-            string toc = await Task.Run(() =>
+            ShowEmpty(content, status, "月幕没有找到该游戏的文章/攻略。", $"{YmgalBase}/ga{gid}");
+            return;
+        }
+        status.Text = $"月幕找到 {articles.Count} 篇相关文章（含攻略/感想）：";
+        for (int i = 0; i < articles.Count; i++)
+        {
+            (string title, string url) = articles[i];
+            AddResultRow(content, i + 1, title, async () =>
             {
-                var doc = new HtmlParser().ParseDocument(html);
-                var element = doc.QuerySelector("div.introduction-content");
-                return element is null ? string.Empty : HtmlToText(element.InnerHtml);
+                content.Children.Clear();
+                status.Text = $"正在加载「{title}」…";
+                string text = await GetYmgalArticleTextAsync(url);
+                if (string.IsNullOrWhiteSpace(text))
+                {
+                    ShowEmpty(content, status, "文章内容为空。", url);
+                    return;
+                }
+                ShowText(text, content, status, url);
             });
-            if (string.IsNullOrWhiteSpace(toc))
-            {
-                ShowEmpty(content, status, "月幕档案暂无目录内容，可在浏览器中查看完整档案。", url);
-                return;
-            }
-            status.Text = "月幕档案目录（完整攻略/介绍请打开浏览器查看）：";
-            AddOpenSiteButton(content, url);
-            TextBlock body = new()
-            {
-                Text = toc,
-                TextWrapping = TextWrapping.Wrap,
-                FontSize = 13,
-                LineHeight = 20,
-                IsTextSelectionEnabled = true,
-            };
-            content.Children.Add(body);
         }
-        catch (Exception e)
+    }
+
+    private async Task<List<(string Title, string Url)>> GetYmgalArticlesAsync(int gid)
+    {
+        string html = await GetAsync($"{YmgalBase}/ga{gid}");
+        return await Task.Run(() =>
         {
-            status.Text = $"月幕加载失败：{e.Message}";
-            AddOpenSiteButton(content, url);
-        }
+            var doc = new HtmlParser().ParseDocument(html);
+            var list = new List<(string, string)>();
+            var seen = new HashSet<string>();
+            foreach (var item in doc.QuerySelectorAll("div.article-item"))
+            {
+                var link = item.QuerySelector("a.article-title");
+                if (link is null) continue;
+                string href = link.GetAttribute("href") ?? string.Empty;
+                if (!Regex.IsMatch(href, @"^/co/article/\d+$")) continue;
+                string title = link.TextContent.Trim();
+                if (title.Length < 2) continue;
+                string full = $"{YmgalBase}{href}";
+                if (seen.Add(full)) list.Add((title, full));
+            }
+            return list;
+        });
+    }
+
+    private static async Task<string> GetYmgalArticleTextAsync(string url)
+    {
+        string html = await GetAsync(url);
+        return await Task.Run(() =>
+        {
+            var doc = new HtmlParser().ParseDocument(html);
+            var element = doc.QuerySelector("div.article-content");
+            return element is null ? string.Empty : HtmlToText(element.InnerHtml);
+        });
     }
 
     #endregion
