@@ -63,7 +63,7 @@ public partial class Plugin : IGalgamePageRightPanel
                 Data.Domain = selected;
         };
 
-        Button detectButton = new() { Content = "自动检测可用域名" };
+        Button detectButton = new() { Content = "自动检测可用域名", HorizontalAlignment = HorizontalAlignment.Right };
         detectButton.Click += async (_, _) =>
         {
             detectButton.IsEnabled = false;
@@ -80,9 +80,13 @@ public partial class Plugin : IGalgamePageRightPanel
             Plugin.HostApi.Info(Microsoft.UI.Xaml.Controls.InfoBarSeverity.Success,
                 $"已切换到可用域名：{found}");
         };
-        StackPanel domainStack = new() { Spacing = 6 };
-        domainStack.Children.Add(domainBox);
-        domainStack.Children.Add(detectButton);
+        Grid domainRow = new() { Width = 320 };
+        domainRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        domainRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        domainRow.Children.Add(domainBox);
+        Grid.SetColumn(domainBox, 0);
+        domainRow.Children.Add(detectButton);
+        Grid.SetColumn(detectButton, 1);
 
         Button clearButton = new() { Content = "清除已保存的关联" };
         clearButton.Click += (_, _) => Data.TopicUrlMap.Clear();
@@ -91,7 +95,7 @@ public partial class Plugin : IGalgamePageRightPanel
         panel.Children.Add(new StdSetting("默认攻略来源",
             "自动：游戏有月幕档案编号时用月幕，否则用 2DFan。可在游戏页内手动切换单个游戏的来源。", sourceBox));
         panel.Children.Add(new StdSetting("2DFan 域名",
-            "官方域 2dfan.com 在中国大陆无法访问，域名失效时可点“自动检测”选择可用备用域", domainStack));
+            "官方域 2dfan.com 在中国大陆无法访问，域名失效时可点“自动检测”选择可用备用域", domainRow));
         panel.Children.Add(new StdSetting("已保存的攻略关联",
             $"共 {Data.TopicUrlMap.Count} 个游戏已关联攻略页，清除后需重新检索", clearButton));
         return panel;
