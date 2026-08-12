@@ -21,7 +21,7 @@ namespace PotatoVN.App.PluginBase
         {
             Id = new Guid("c9a68427-b773-4a98-bb66-2c6f4a4ebe37"),
             Name = "攻略面板",
-            Description = "在游戏详情页显示 2DFan 攻略。自动按游戏名检索，可手动关联并直达。",
+            Description = "在游戏详情页显示攻略，支持 2DFan 与月幕（中文）双来源，自动检索并支持手动关联直达。",
         };
 
         public async Task InitializeAsync(IPotatoVnApi hostApi)
@@ -66,6 +66,9 @@ namespace PotatoVN.App.PluginBase.Models
 
         /// <summary>2DFan 域名（官方域会被墙，备用域 2dfdf.de / 2dfmax.top）</summary>
         [ObservableProperty] private string _domain = "https://2dfan.com";
+
+        /// <summary>默认攻略来源："auto"（自动）| "2dfan" | "ymgal"</summary>
+        [ObservableProperty] private string _defaultSource = "auto";
 
         /// <summary>游戏 Uuid -> 2DFan 攻略 topic 页 URL</summary>
         public Dictionary<Guid, string> TopicUrlMap { get; set; } = [];
