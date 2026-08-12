@@ -51,7 +51,7 @@ public partial class Plugin : IGalgamePageRightPanel
             Data.DefaultSource = sourceBox.SelectedIndex switch { 1 => "2dfan", 2 => "ymgal", _ => "auto" };
         };
 
-        ComboBox domainBox = new() { Width = 180, MinWidth = 0 };
+        ComboBox domainBox = new() { MinWidth = 200 };
         foreach (string candidate in Known2DfanDomains)
             domainBox.Items.Add(candidate);
         if (!Known2DfanDomains.Contains(Data.Domain))
@@ -80,11 +80,11 @@ public partial class Plugin : IGalgamePageRightPanel
             Plugin.HostApi.Info(Microsoft.UI.Xaml.Controls.InfoBarSeverity.Success,
                 $"已切换到可用域名：{found}");
         };
-        StackPanel domainStack = new() { Spacing = 6, Width = 300 };
+        StackPanel domainStack = new() { Spacing = 6 };
         domainStack.Children.Add(domainBox);
         domainStack.Children.Add(detectButton);
 
-        Button clearButton = new() { Content = "清除已保存的关联", MinWidth = 300 };
+        Button clearButton = new() { Content = "清除已保存的关联" };
         clearButton.Click += (_, _) => Data.TopicUrlMap.Clear();
 
         StdStackPanel panel = new();
