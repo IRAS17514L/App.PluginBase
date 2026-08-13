@@ -56,7 +56,7 @@ namespace PotatoVN.App.PluginBase
             if (!Data.AutoOpenFloatOnLaunch) return;
             Data.ActiveGameUuid = message.Value.Uuid;
             Data.ActiveGamePlayedAt = DateTime.Now;
-            HostApi.InvokeOnMainThread(() => OpenFloatingWindow(message.Value));
+            _ = OpenFloatingWindowDelayedAsync(message.Value);
         }
 
         private void OnGameStopped(object recipient, GalgameStoppedMessage message)
@@ -124,5 +124,8 @@ namespace PotatoVN.App.PluginBase.Models
 
         /// <summary>最后一次启动游戏的时间（防止重启后误开很久以前的开局）</summary>
         [ObservableProperty] private DateTime? _activeGamePlayedAt;
+
+        /// <summary>浮窗是否默认置顶</summary>
+        [ObservableProperty] private bool _pinFloatOnTop = true;
     }
 }

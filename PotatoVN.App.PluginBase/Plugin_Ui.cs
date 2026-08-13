@@ -229,34 +229,81 @@ public partial class Plugin : IGalgamePageRightPanel
 
             Window window = new() { Title = $"攻略 - {game.Name.Value}" };
             StackPanel content = new() { Padding = new Thickness(8), Spacing = 6 };
+
+            OverlappedPresenter? presenter = window.AppWindow.Presenter as OverlappedPresenter;
+            if (presenter is not null)
+            {
+                presenter.IsAlwaysOnTop = Data.PinFloatOnTop;
+                presenter.IsMaximizable = false;
+                presenter.IsMinimizable = false;
+            }
+
+            FontIcon pinIcon = new()
+            {
+                Glyph = Data.PinFloatOnTop ? "\uE718" : "\uE77A",
+                FontFamily = new FontFamily("Segoe Fluent Icons,Segoe MDL2 Assets"),
+            };
+            ToggleButton pinButton = new()
+            {
+                MinHeight = 28,
+                IsChecked = Data.PinFloatOnTop,
+            };
+            pinButton.Content = pinIcon;
+            void UpdatePinState()
+            {
+                pinIcon.Glyph = pinButton.IsChecked == true ? "\uE718" : "\uE77A";
+                if (presenter is not null) presenter.IsAlwaysOnTop = pinButton.IsChecked == true;
+                Data.PinFloatOnTop = pinButton.IsChecked == true;
+            }
+            pinButton.Checked += (_, _) => UpdatePinState();
+            pinButton.Unchecked += (_, _) => UpdatePinState();
+
             Button closeButton = new()
             {
                 Content = "关闭",
-                HorizontalAlignment = HorizontalAlignment.Right,
                 MinHeight = 28,
                 Padding = new Thickness(12, 3, 12, 3),
             };
             closeButton.Click += (_, _) => window.Close();
-            content.Children.Add(closeButton);
+
+            StackPanel buttonRow = new()
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 6,
+                HorizontalAlignment = HorizontalAlignment.Right,
+            };
+            buttonRow.Children.Add(pinButton);
+            buttonRow.Children.Add(closeButton);
+            content.Children.Add(buttonRow);
             content.Children.Add(BuildGuidePanel(game, false));
+
+            window.SystemBackdrop = new MicaBackdrop();
             window.Content = content;
 
-            if (window.AppWindow.Presenter is OverlappedPresenter presenter)
-            {
-                presenter.IsAlwaysOnTop = true;
-                presenter.IsMaximizable = false;
-                presenter.IsMinimizable = false;
-            }
             window.AppWindow.Resize(new Windows.Graphics.SizeInt32(480, 700));
 
             FloatingWindows[game.Uuid] = window;
             window.Closed += (_, _) => FloatingWindows.Remove(game.Uuid);
             window.Activate();
-            _ = BumpTopmostAfterMagpieAsync(window);
+            if (Data.PinFloatOnTop) _ = BumpTopmostAfterMagpieAsync(window);
         }
         catch (Exception)
         {
             Plugin.HostApi.Info(Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning, "攻略浮窗暂不可用（宿主限制）", null, 3000);
+        }
+    }
+
+    private async Task OpenFloatingWindowDelayedAsync(Galgame game)
+    {
+        try
+        {
+            await Task.Delay(2200); // 等宿主 SetWindowMode 执行完（SystemTray 模式下旧进程此时已退出，窗口不会在旧进程出现）
+            if (Data.ActiveGameUuid != game.Uuid) return; // 期间切了游戏或已停止则放弃
+            HostApi.InvokeOnMainThread(() => OpenFloatingWindow(game));
+        }
+        catch (Exception)
+        {
+            // 忽略
         }
     }
 
