@@ -87,13 +87,6 @@ namespace PotatoVN.App.PluginBase
                 if (DateTime.Now - playedAt > TimeSpan.FromMinutes(15)) return;
                 Galgame? game = _hostApi.GetAllGames().FirstOrDefault(g => g.Uuid == uuid);
                 if (game is null) return;
-                // 游戏进程必须真的在跑，否则是残留状态，清掉
-                if (!await IsGameProcessRunningAsync(game))
-                {
-                    Data.ActiveGameUuid = null;
-                    Data.ActiveGamePlayedAt = null;
-                    return;
-                }
                 await Task.Delay(600); // 等宿主界面稳定（新进程 UI 就绪即可，窗口独立于宿主页面）
                 HostApi.InvokeOnMainThread(() => OpenFloatingWindow(game));
             }
