@@ -134,7 +134,15 @@ public partial class Plugin : IGalgamePageRightPanel
         panelState.Content = content;
         panelState.Status = status;
 
-        StackPanel root = new() { Spacing = 8, MaxWidth = 380 };
+        Grid root = new()
+        {
+            RowSpacing = 8,
+            MaxWidth = 380,
+            VerticalAlignment = fillHeight ? VerticalAlignment.Stretch : VerticalAlignment.Top,
+        };
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // header（showHeader 时）
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // status
+        root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) }); // scroll
         header = null;
         if (showHeader)
         {
@@ -172,6 +180,7 @@ public partial class Plugin : IGalgamePageRightPanel
                 headerPanel.Children.Add(floatButton);
             }
             headerPanel.Children.Add(progressRing);
+            Grid.SetRow(headerPanel, 0);
             root.Children.Add(headerPanel);
             header = headerPanel;
 
@@ -186,7 +195,9 @@ public partial class Plugin : IGalgamePageRightPanel
             MaxHeight = fillHeight ? double.PositiveInfinity : 420,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
         };
+        Grid.SetRow(status, 1);
         root.Children.Add(status);
+        Grid.SetRow(scroll, 2);
         root.Children.Add(scroll);
 
         _ = ShowSourceAsync(game, content, status, null, panelState);
