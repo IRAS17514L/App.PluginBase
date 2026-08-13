@@ -10,6 +10,8 @@ using GalgameManager.WinApp.Base.Contracts.PluginUi;
 using GalgameManager.WinApp.Base.Models;
 using GalgameManager.WinApp.Base.Models.Msgs;
 using GalgameManager.Models;
+using Microsoft.Windows.AppLifecycle;
+using Windows.ApplicationModel.Activation;
 using PotatoVN.App.PluginBase.Helper;
 using PotatoVN.App.PluginBase.Models;
 
@@ -73,7 +75,7 @@ namespace PotatoVN.App.PluginBase
                 if (!Data.AutoOpenFloatOnLaunch) return;
                 if (Data.ActiveGameUuid is not { } uuid || Data.ActiveGamePlayedAt is not { } playedAt) return;
                 // 仅宿主重启（SystemTray 游玩模式的 /r 重启）后恢复；正常启动一律不弹
-                if (Environment.GetCommandLineArgs().Any(a => a == "/r") == false)
+                if (IsHostRestart() == false)
                 {
                     Data.ActiveGameUuid = null;
                     Data.ActiveGamePlayedAt = null;
@@ -97,6 +99,26 @@ namespace PotatoVN.App.PluginBase
             {
                 // 浮窗恢复失败不阻塞插件启动
             }
+        }
+
+        private static bool IsHostRestart()
+        {
+            try
+            {
+                var args = AppInstance.GetCurrent().GetActivatedEventArgs();
+                if (args.Kind == ExtendedActivationKind.Launch && args.Data is ILaunchActivatedEventArgs launchArgs)
+                {
+                    string[] argStrings = launchArgs.Arguments.Split();
+                    if (argStrings.Length > 1)
+                        argStrings = argStrings.Skip(1).ToArray();
+                    if (argStrings.Contains("/r")) return true;
+                }
+            }
+            catch (Exception)
+            {
+                // 激活参数不可用时退回命令行判定
+            }
+            return Environment.GetCommandLineArgs().Any(a => a == "/r");
         }
 
         public Task OnUninstallAsync(bool deleteData, Action<TimeSpan> extendWaitHandler, CancellationToken cts)
