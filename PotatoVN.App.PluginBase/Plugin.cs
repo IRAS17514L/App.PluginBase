@@ -92,7 +92,7 @@ namespace PotatoVN.App.PluginBase
                     Data.ActiveGamePlayedAt = null;
                     return;
                 }
-                await Task.Delay(1500); // 等宿主界面稳定
+                await Task.Delay(600); // 等宿主界面稳定（新进程 UI 就绪即可，窗口独立于宿主页面）
                 HostApi.InvokeOnMainThread(() => OpenFloatingWindow(game));
             }
             catch (Exception)

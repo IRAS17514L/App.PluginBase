@@ -327,7 +327,7 @@ public partial class Plugin : IGalgamePageRightPanel
     {
         while (true)
         {
-            await Task.Delay(5000);
+            await Task.Delay(2000);
             if (!FloatingWindows.ContainsKey(game.Uuid)) return;
             // 手动打开（非活跃游戏）的窗口不由看门狗关闭
             if (Data.ActiveGameUuid != game.Uuid) return;
