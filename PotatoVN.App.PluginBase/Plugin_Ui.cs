@@ -303,8 +303,8 @@ public partial class Plugin : IGalgamePageRightPanel
             backButton.Click += (_, _) => PopBack(panelState);
             panelState.BarBackButton = backButton;
 
-            // 极简按钮（完整模式回极简；内收 Collapse，与展开按钮外扩 E9D9 成对）
-            Button minimalButton = new() { Content = CreateGlyphIcon("\uE9D7"), MinHeight = 24, Padding = new Thickness(8, 2, 8, 2) };
+            // 极简按钮（完整模式回极简；内收 FullScreenMinimize，与展开外扩成对）
+            Button minimalButton = new() { Content = CreateGlyphIcon("\uF8075"), MinHeight = 24, Padding = new Thickness(8, 2, 8, 2) };
             ToolTipService.SetToolTip(minimalButton, "极简");
 
             // 钉子置顶
@@ -411,7 +411,7 @@ public partial class Plugin : IGalgamePageRightPanel
             Button overlayBackButton = new() { Content = CreateGlyphIcon("\uE72B"), MinHeight = 24, Padding = new Thickness(8, 2, 8, 2) };
             ToolTipService.SetToolTip(overlayBackButton, "返回");
             overlayBackButton.Click += (_, _) => PopBack(state);
-            Button expandButton = new() { Content = CreateGlyphIcon("\uE9D9"), MinHeight = 24, Padding = new Thickness(8, 2, 8, 2), Opacity = 0.6 };
+            Button expandButton = new() { Content = CreateGlyphIcon("\uF8073"), MinHeight = 24, Padding = new Thickness(8, 2, 8, 2), Opacity = 0.6 };
             ToolTipService.SetToolTip(expandButton, "展开");
             expandButton.Click += (_, _) => { Data.MinimalMode = false; ApplyMode(); };
             overlay.Children.Add(overlayBackButton);
