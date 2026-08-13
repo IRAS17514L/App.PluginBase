@@ -44,7 +44,6 @@ public partial class Plugin : IGalgamePageRightPanel
         public ProgressRing? ProgressRing;
         public StackPanel? Content;
         public TextBlock? Status;
-        public Button? BackButton;
         public Button? OverlayBackButton;
         public Button? PanelHeaderBackButton;
         public Stack<(string StatusText, UIElement[] Children)> BackStack = [];
@@ -170,7 +169,7 @@ public partial class Plugin : IGalgamePageRightPanel
             panelState.ProgressRing = progressRing;
 
             StackPanel headerPanel = new() { Orientation = Orientation.Horizontal, Spacing = 6 };
-            if (showFloatButton) // 详情页场景：浮窗有自己的 bar/叠加层返回按钮，详情页需要这里
+            if (showHeader) // 详情页 + 浮窗完整模式：header 提供返回入口
             {
                 Button backButton = new()
                 {
@@ -267,7 +266,6 @@ public partial class Plugin : IGalgamePageRightPanel
 
     private static void UpdateBackButtons(PanelState state, bool visible)
     {
-        if (state.BackButton is not null) state.BackButton.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
         if (state.OverlayBackButton is not null) state.OverlayBackButton.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
         if (state.PanelHeaderBackButton is not null) state.PanelHeaderBackButton.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
     }
@@ -318,18 +316,6 @@ public partial class Plugin : IGalgamePageRightPanel
             FrameworkElement panel = BuildGuidePanel(game, false, true, true, out FrameworkElement? header, out PanelState state);
             PanelState panelState = state;
 
-            // 返回按钮（返回上一层，选错攻略可回退）
-            Button backButton = new()
-            {
-                Content = CreateGlyphIcon("\uE72B"),
-                MinHeight = 24,
-                Padding = new Thickness(8, 2, 8, 2),
-                Visibility = Visibility.Collapsed,
-            };
-            ToolTipService.SetToolTip(backButton, "返回");
-            backButton.Click += (_, _) => PopBack(panelState);
-            panelState.BackButton = backButton;
-
             // 极简按钮（完整模式回极简）
             Button minimalButton = new() { Content = CreateGlyphIcon("\uE8A3"), MinHeight = 24, Padding = new Thickness(8, 2, 8, 2) };
             ToolTipService.SetToolTip(minimalButton, "极简");
@@ -353,7 +339,6 @@ public partial class Plugin : IGalgamePageRightPanel
                 Spacing = 6,
                 HorizontalAlignment = HorizontalAlignment.Right,
             };
-            bar.Children.Add(backButton);
             bar.Children.Add(minimalButton);
             bar.Children.Add(pinButton);
             bar.Children.Add(closeButton);
