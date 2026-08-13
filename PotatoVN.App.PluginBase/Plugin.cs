@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
@@ -60,7 +60,22 @@ namespace PotatoVN.App.PluginBase
             if (!Data.AutoOpenFloatOnLaunch) return;
             Data.ActiveGameUuid = message.Value.Uuid;
             Data.ActiveGamePlayedAt = DateTime.Now;
-            _ = OpenFloatingWindowDelayedAsync(message.Value);
+            _ = SaveAndOpenDelayedAsync(message.Value);
+        }
+
+        private async Task SaveAndOpenDelayedAsync(Galgame game)
+        {
+            try
+            {
+                // 宿主 SystemTray 游玩模式约 1s 后 Restart("/r") 杀旧进程；必须等数据落盘，
+                // 否则新进程 TryRestore 读不到 ActiveGameUuid，浮窗无法恢复
+                await _hostApi.SaveDataAsync(System.Text.Json.JsonSerializer.Serialize(Data));
+            }
+            catch (Exception)
+            {
+                // 保存失败不阻塞后续弹窗尝试
+            }
+            await OpenFloatingWindowDelayedAsync(game);
         }
 
         private void OnGameStopped(object recipient, GalgameStoppedMessage message)
@@ -85,7 +100,13 @@ namespace PotatoVN.App.PluginBase
                 }
                 // 超 15 分钟视为过期
                 if (DateTime.Now - playedAt > TimeSpan.FromMinutes(15)) return;
-                Galgame? game = _hostApi.GetAllGames().FirstOrDefault(g => g.Uuid == uuid);
+                // 宿主游戏库可能尚未加载完，轮询等待（最多 ~3s）
+                Galgame? game = null;
+                for (int i = 0; i < 10 && game is null; i++)
+                {
+                    game = _hostApi.GetAllGames().FirstOrDefault(g => g.Uuid == uuid);
+                    if (game is null) await Task.Delay(300);
+                }
                 if (game is null) return;
                 await Task.Delay(600); // 等宿主界面稳定（新进程 UI 就绪即可，窗口独立于宿主页面）
                 HostApi.InvokeOnMainThread(() => OpenFloatingWindow(game));

@@ -39,13 +39,15 @@ public partial class Plugin : IGalgamePageRightPanel
     private sealed class PanelState
     {
         public string CurrentSource = "2dfan";
+        public string? OpenSiteUrl;
+        public Button? SiteButton;
         public ToggleButton? Source2dfan;
         public ToggleButton? SourceYmgal;
         public ProgressRing? ProgressRing;
         public StackPanel? Content;
         public TextBlock? Status;
         public Button? OverlayBackButton;
-        public Button? PanelHeaderBackButton;
+        public Button? BarBackButton;
         public Stack<(string StatusText, UIElement[] Children)> BackStack = [];
     }
 
@@ -117,9 +119,20 @@ public partial class Plugin : IGalgamePageRightPanel
         return panel;
     }
 
-    public Task<FrameworkElement> CreateRightPanelUiAsync(Galgame game) => Task.FromResult(BuildGuidePanel(game, true, true, false, out _, out _));
+    public Task<FrameworkElement> CreateRightPanelUiAsync(Galgame game)
+    {
+        Button floatButton = new()
+        {
+            Content = "打开攻略浮窗",
+            MinHeight = 28,
+            Padding = new Thickness(12, 3, 12, 3),
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+        };
+        floatButton.Click += (_, _) => OpenFloatingWindow(game);
+        return Task.FromResult<FrameworkElement>(floatButton);
+    }
 
-    private FrameworkElement BuildGuidePanel(Galgame game, bool showFloatButton, bool showHeader, bool fillHeight, out FrameworkElement? header, out PanelState state)
+    private FrameworkElement BuildGuidePanel(Galgame game, bool fillHeight, out PanelState state)
     {
         state = new() { CurrentSource = ResolveDefaultSource(game) };
         PanelState panelState = state;
@@ -140,68 +153,8 @@ public partial class Plugin : IGalgamePageRightPanel
             MaxWidth = 380,
             VerticalAlignment = fillHeight ? VerticalAlignment.Stretch : VerticalAlignment.Top,
         };
-        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // header（showHeader 时）
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // status
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) }); // scroll
-        header = null;
-        if (showHeader)
-        {
-            TextBlock title = new() { Text = "攻略", FontSize = 15, FontWeight = FontWeights.SemiBold };
-
-            ToggleButton source2dfan = new()
-            {
-                Content = "2DFan",
-                MinHeight = 28,
-                Padding = new Thickness(12, 3, 12, 3),
-                IsChecked = panelState.CurrentSource == "2dfan",
-            };
-            ToggleButton sourceYmgal = new()
-            {
-                Content = "月幕",
-                MinHeight = 28,
-                Padding = new Thickness(12, 3, 12, 3),
-                IsChecked = panelState.CurrentSource == "ymgal",
-            };
-            panelState.Source2dfan = source2dfan;
-            panelState.SourceYmgal = sourceYmgal;
-            Button refresh = new() { Content = "重新检索", MinHeight = 28, Padding = new Thickness(12, 3, 12, 3) };
-            ProgressRing progressRing = new() { Width = 16, Height = 16, IsActive = false };
-            panelState.ProgressRing = progressRing;
-
-            StackPanel headerPanel = new() { Orientation = Orientation.Horizontal, Spacing = 6 };
-            if (showHeader) // 详情页 + 浮窗完整模式：header 提供返回入口
-            {
-                Button backButton = new()
-                {
-                    Content = CreateGlyphIcon("\uE72B"),
-                    MinHeight = 28,
-                    Padding = new Thickness(12, 3, 12, 3),
-                    Visibility = Visibility.Collapsed,
-                };
-                ToolTipService.SetToolTip(backButton, "返回");
-                backButton.Click += (_, _) => PopBack(panelState);
-                panelState.PanelHeaderBackButton = backButton;
-                headerPanel.Children.Add(backButton);
-            }
-            headerPanel.Children.Add(title);
-            headerPanel.Children.Add(source2dfan);
-            headerPanel.Children.Add(sourceYmgal);
-            headerPanel.Children.Add(refresh);
-            if (showFloatButton)
-            {
-                Button floatButton = new() { Content = "浮窗", MinHeight = 28, Padding = new Thickness(12, 3, 12, 3) };
-                floatButton.Click += (_, _) => OpenFloatingWindow(game);
-                headerPanel.Children.Add(floatButton);
-            }
-            headerPanel.Children.Add(progressRing);
-            Grid.SetRow(headerPanel, 0);
-            root.Children.Add(headerPanel);
-            header = headerPanel;
-
-            source2dfan.Click += (_, _) => _ = ShowSourceAsync(game, content, status, "2dfan", panelState);
-            sourceYmgal.Click += (_, _) => _ = ShowSourceAsync(game, content, status, "ymgal", panelState);
-            refresh.Click += (_, _) => _ = ShowSourceAsync(game, content, status, panelState.CurrentSource, panelState);
-        }
 
         ScrollViewer scroll = new()
         {
@@ -209,9 +162,9 @@ public partial class Plugin : IGalgamePageRightPanel
             MaxHeight = fillHeight ? double.PositiveInfinity : 420,
             VerticalScrollBarVisibility = ScrollBarVisibility.Hidden,
         };
-        Grid.SetRow(status, 1);
+        Grid.SetRow(status, 0);
         root.Children.Add(status);
-        Grid.SetRow(scroll, 2);
+        Grid.SetRow(scroll, 1);
         root.Children.Add(scroll);
 
         _ = ShowSourceAsync(game, content, status, null, panelState);
@@ -267,7 +220,7 @@ public partial class Plugin : IGalgamePageRightPanel
     private static void UpdateBackButtons(PanelState state, bool visible)
     {
         if (state.OverlayBackButton is not null) state.OverlayBackButton.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
-        if (state.PanelHeaderBackButton is not null) state.PanelHeaderBackButton.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        if (state.BarBackButton is not null) state.BarBackButton.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private static void PushBack(PanelState state)
@@ -313,11 +266,45 @@ public partial class Plugin : IGalgamePageRightPanel
                 presenter.IsMinimizable = false;
             }
 
-            FrameworkElement panel = BuildGuidePanel(game, false, true, true, out FrameworkElement? header, out PanelState state);
+            FrameworkElement panel = BuildGuidePanel(game, true, out PanelState state);
             PanelState panelState = state;
 
-            // 极简按钮（完整模式回极简）
-            Button minimalButton = new() { Content = CreateGlyphIcon("\uE8A3"), MinHeight = 24, Padding = new Thickness(8, 2, 8, 2) };
+            // 来源切换（2DFan/月幕，与返回/极简同行）
+            ToggleButton source2dfan = new()
+            {
+                Content = "2DFan",
+                FontSize = 12,
+                MinHeight = 24,
+                Padding = new Thickness(8, 2, 8, 2),
+                IsChecked = panelState.CurrentSource == "2dfan",
+            };
+            ToggleButton sourceYmgal = new()
+            {
+                Content = "月幕",
+                FontSize = 12,
+                MinHeight = 24,
+                Padding = new Thickness(8, 2, 8, 2),
+                IsChecked = panelState.CurrentSource == "ymgal",
+            };
+            panelState.Source2dfan = source2dfan;
+            panelState.SourceYmgal = sourceYmgal;
+            source2dfan.Click += (_, _) => _ = ShowSourceAsync(game, panelState.Content!, panelState.Status!, "2dfan", panelState);
+            sourceYmgal.Click += (_, _) => _ = ShowSourceAsync(game, panelState.Content!, panelState.Status!, "ymgal", panelState);
+
+            // 返回（回退一层；与极简同行，最左侧）
+            Button backButton = new()
+            {
+                Content = CreateGlyphIcon("\uE72B"),
+                MinHeight = 24,
+                Padding = new Thickness(8, 2, 8, 2),
+                Visibility = Visibility.Collapsed,
+            };
+            ToolTipService.SetToolTip(backButton, "返回");
+            backButton.Click += (_, _) => PopBack(panelState);
+            panelState.BarBackButton = backButton;
+
+            // 极简按钮（完整模式回极简；内收 Collapse，与展开按钮外扩 E9D9 成对）
+            Button minimalButton = new() { Content = CreateGlyphIcon("\uE9D7"), MinHeight = 24, Padding = new Thickness(8, 2, 8, 2) };
             ToolTipService.SetToolTip(minimalButton, "极简");
 
             // 钉子置顶
@@ -330,8 +317,35 @@ public partial class Plugin : IGalgamePageRightPanel
             ToggleButton pinButton = new() { MinHeight = 24, Padding = new Thickness(8, 2, 8, 2), IsChecked = Data.PinFloatOnTop };
             pinButton.Content = pinIcon;
 
-            // 关闭（隐藏式，避免最后一个窗口导致应用退出）
-            Button closeButton = new() { Content = "关闭", MinHeight = 24, Padding = new Thickness(8, 2, 8, 2) };
+            // 重新检索（↻，与返回/网站同行，位于返回与网站中间）
+            Button refreshButton = new() { Content = "↻", FontSize = 12, MinHeight = 24, Padding = new Thickness(8, 2, 8, 2) };
+            ToolTipService.SetToolTip(refreshButton, "重新检索");
+            refreshButton.Click += (_, _) => _ = ShowSourceAsync(game, panelState.Content!, panelState.Status!, panelState.CurrentSource, panelState);
+
+            // 浏览器打开站点（符号化，替代内容区文字按钮）
+            Button siteButton = new()
+            {
+                Content = "⇱",
+                FontSize = 12,
+                MinHeight = 24,
+                Padding = new Thickness(8, 2, 8, 2),
+                Visibility = Visibility.Collapsed,
+            };
+            ToolTipService.SetToolTip(siteButton, "在浏览器打开站点页面");
+            siteButton.Click += (_, _) =>
+            {
+                if (panelState.OpenSiteUrl is { } siteUrl)
+                    _ = Windows.System.Launcher.LaunchUriAsync(new Uri(siteUrl));
+            };
+            panelState.SiteButton = siteButton;
+
+            // 关闭（隐藏式，避免最后一个窗口导致应用退出；叉号）
+            Button closeButton = new() { Content = CreateGlyphIcon("\uE8BB"), MinHeight = 24, Padding = new Thickness(8, 2, 8, 2) };
+            ToolTipService.SetToolTip(closeButton, "关闭");
+
+            // 加载进度圈（原在 header，随来源按钮同移入 bar）
+            ProgressRing progressRing = new() { Width = 16, Height = 16, IsActive = false, VerticalAlignment = VerticalAlignment.Center };
+            panelState.ProgressRing = progressRing;
 
             StackPanel bar = new()
             {
@@ -339,9 +353,15 @@ public partial class Plugin : IGalgamePageRightPanel
                 Spacing = 6,
                 HorizontalAlignment = HorizontalAlignment.Right,
             };
+            bar.Children.Add(backButton); // 返回按钮：bar 最左侧，与极简同行
+            bar.Children.Add(refreshButton); // 重新检索：返回与网站中间
+            bar.Children.Add(source2dfan);  // 来源：2DFan
+            bar.Children.Add(sourceYmgal);  // 来源：月幕
+            bar.Children.Add(siteButton); // 网站打开：极简按钮左侧
             bar.Children.Add(minimalButton);
             bar.Children.Add(pinButton);
             bar.Children.Add(closeButton);
+            bar.Children.Add(progressRing); // 加载进度圈
 
             // 叠加层：仅极简模式，悬浮内容右上（hover 显隐）
             StackPanel overlay = new()
@@ -359,11 +379,6 @@ public partial class Plugin : IGalgamePageRightPanel
                 bar.Visibility = minimal ? Visibility.Collapsed : Visibility.Visible;
                 overlay.Visibility = Visibility.Collapsed; // 叠加层仅极简+hover 显示
                 UpdateBackButtons(panelState, panelState.BackStack.Count > 0);
-                if (header is not null) header.Visibility = minimal ? Visibility.Collapsed : Visibility.Visible;
-                if (panelState.Content is not null)
-                    foreach (var child in panelState.Content.Children)
-                        if (child is FrameworkElement fe && fe.Tag as string == "openSite")
-                            fe.Visibility = minimal ? Visibility.Collapsed : Visibility.Visible;
                 window.AppWindow.Resize(minimal
                     ? new Windows.Graphics.SizeInt32(300, 380)   // 小窗模式
                     : new Windows.Graphics.SizeInt32(480, 700)); // 完整模式
@@ -448,12 +463,19 @@ public partial class Plugin : IGalgamePageRightPanel
         try
         {
             await Task.Delay(2200); // 等宿主 SetWindowMode 执行完（SystemTray 模式下旧进程此时已退出，窗口不会在旧进程出现）
-            if (Data.ActiveGameUuid != game.Uuid) return; // 期间切了游戏或已停止则放弃
+            if (Data.ActiveGameUuid != game.Uuid)
+            {
+                // 2.2s 内切了游戏/停止：放弃弹窗（诊断用，非错误）
+                Plugin.HostApi.Info(Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning,
+                    $"自动弹窗已放弃：2.2s 内 ActiveGameUuid 已变更（期望 {game.Uuid}）", null, 3000);
+                return;
+            }
             HostApi.InvokeOnMainThread(() => OpenFloatingWindow(game));
         }
-        catch (Exception)
+        catch (Exception e)
         {
-            // 忽略
+            Plugin.HostApi.Info(Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning,
+                $"自动弹窗失败：{e.Message}", null, 3000);
         }
     }
 
@@ -596,7 +618,10 @@ public partial class Plugin : IGalgamePageRightPanel
             {
                 string url = RewriteDomain(cachedUrl);
                 if (url != cachedUrl) Data.TopicUrlMap[game.Uuid] = url;
-                await ShowTopicAsync(url, content, status);
+                // 缓存直达：先压入"重新检索"返回层，返回后仍可更换攻略
+                ShowCachedPlaceholder(game, content, status, state);
+                PushBack(state);
+                await ShowTopicAsync(url, content, status, state);
                 return;
             }
             await SearchAndShowAsync(game, content, status, state);
@@ -605,6 +630,18 @@ public partial class Plugin : IGalgamePageRightPanel
         {
             status.Text = $"获取失败：{e.Message}";
         }
+    }
+
+    private void ShowCachedPlaceholder(Galgame game, StackPanel content, TextBlock status, PanelState state)
+    {
+        status.Text = "已关联攻略页（缓存直达），可重新检索更换：";
+        content.Children.Clear();
+        AddResultRow(content, 0, "重新检索攻略", () =>
+        {
+            Data.TopicUrlMap.Remove(game.Uuid);
+            SaveData();
+            _ = SearchAndShowAsync(game, content, status, state);
+        });
     }
 
     private async Task SearchAndShowAsync(Galgame game, StackPanel content, TextBlock status, PanelState state)
@@ -618,7 +655,7 @@ public partial class Plugin : IGalgamePageRightPanel
             if (subjects.Count == 0)
             {
                 ShowEmpty(content, status, "没有找到结果。",
-                    $"{Data.Domain}/subjects/search?keyword={Uri.EscapeDataString(query)}");
+                    $"{Data.Domain}/subjects/search?keyword={Uri.EscapeDataString(query)}", state);
                 return;
             }
             status.Text = $"找到 {subjects.Count} 个条目，点击获取攻略列表";
@@ -635,7 +672,7 @@ public partial class Plugin : IGalgamePageRightPanel
                         List<(string Title, string Url)> topics = await GetTopicsAsync(url);
                         if (topics.Count == 0)
                         {
-                            ShowEmpty(content, status, "该条目暂无攻略。", url);
+                            ShowEmpty(content, status, "该条目暂无攻略。", url, state);
                             return;
                         }
                         status.Text = $"「{title}」的攻略：";
@@ -647,7 +684,7 @@ public partial class Plugin : IGalgamePageRightPanel
                                 PushBack(state);
                                 Data.TopicUrlMap[game.Uuid] = topicUrl;
                                 SaveData();
-                                await ShowTopicAsync(topicUrl, content, status);
+                                await ShowTopicAsync(topicUrl, content, status, state);
                             });
                         }
                     }
@@ -664,7 +701,7 @@ public partial class Plugin : IGalgamePageRightPanel
         }
     }
 
-    private static async Task ShowTopicAsync(string url, StackPanel content, TextBlock status)
+    private static async Task ShowTopicAsync(string url, StackPanel content, TextBlock status, PanelState state)
     {
         content.Children.Clear();
         status.Text = "正在加载攻略…";
@@ -679,15 +716,15 @@ public partial class Plugin : IGalgamePageRightPanel
             });
             if (string.IsNullOrWhiteSpace(text))
             {
-                ShowEmpty(content, status, "攻略内容为空。", url);
+                ShowEmpty(content, status, "攻略内容为空。", url, state);
                 return;
             }
-            ShowText(text, content, status, url);
+            ShowText(text, content, status, url, state);
         }
         catch (Exception e)
         {
             status.Text = $"加载失败：{e.Message}";
-            AddOpenSiteButton(content, url);
+            SetOpenSite(state, content, url);
         }
     }
 
@@ -744,14 +781,14 @@ public partial class Plugin : IGalgamePageRightPanel
         if (string.IsNullOrEmpty(gidStr) || !int.TryParse(gidStr, out int gid))
         {
             ShowEmpty(content, status, "该游戏没有月幕档案编号，可跳转月幕站内搜索。",
-                $"{YmgalBase}/search?keyword={Uri.EscapeDataString(BuildQuery(game))}");
+                $"{YmgalBase}/search?keyword={Uri.EscapeDataString(BuildQuery(game))}", state);
             return;
         }
         status.Text = "正在加载月幕文章列表…";
         List<(string Title, string Url)> articles = await GetYmgalArticlesAsync(gid);
         if (articles.Count == 0)
         {
-            ShowEmpty(content, status, "月幕没有找到该游戏的文章/攻略。", $"{YmgalBase}/ga{gid}");
+            ShowEmpty(content, status, "月幕没有找到该游戏的文章/攻略。", $"{YmgalBase}/ga{gid}", state);
             return;
         }
         status.Text = $"月幕找到 {articles.Count} 篇相关文章（含攻略/感想）：";
@@ -766,10 +803,10 @@ public partial class Plugin : IGalgamePageRightPanel
                 string text = await GetYmgalArticleTextAsync(url);
                 if (string.IsNullOrWhiteSpace(text))
                 {
-                    ShowEmpty(content, status, "文章内容为空。", url);
+                    ShowEmpty(content, status, "文章内容为空。", url, state);
                     return;
                 }
-                ShowText(text, content, status, url);
+                ShowText(text, content, status, url, state);
             });
         }
     }
@@ -812,10 +849,10 @@ public partial class Plugin : IGalgamePageRightPanel
 
     #region Shared
 
-    private static void ShowText(string text, StackPanel content, TextBlock status, string url)
+    private static void ShowText(string text, StackPanel content, TextBlock status, string url, PanelState state)
     {
         status.Text = string.Empty;
-        AddOpenSiteButton(content, url);
+        SetOpenSite(state, content, url);
         TextBlock body = new()
         {
             Text = text,
@@ -827,11 +864,18 @@ public partial class Plugin : IGalgamePageRightPanel
         content.Children.Add(body);
     }
 
-    private static void ShowEmpty(StackPanel content, TextBlock status, string text, string? url = null)
+    private static void ShowEmpty(StackPanel content, TextBlock status, string text, string? url, PanelState state)
     {
         status.Text = text;
         content.Children.Clear();
-        if (url is not null) AddOpenSiteButton(content, url);
+        if (url is not null) SetOpenSite(state, content, url);
+    }
+
+    // 站点打开按钮：仅浮窗 bar 上"⇱"
+    private static void SetOpenSite(PanelState state, StackPanel content, string url)
+    {
+        state.OpenSiteUrl = url;
+        if (state.SiteButton is not null) state.SiteButton.Visibility = Visibility.Visible;
     }
 
     private static Button AddResultRow(StackPanel content, int index, string text, Action onClick, string? tag = null)
@@ -854,12 +898,6 @@ public partial class Plugin : IGalgamePageRightPanel
         button.Click += (_, _) => onClick();
         content.Children.Add(button);
         return button;
-    }
-
-    private static void AddOpenSiteButton(StackPanel content, string url)
-    {
-        Button button = AddResultRow(content, 0, "在浏览器打开站点页面", () => _ = Windows.System.Launcher.LaunchUriAsync(new Uri(url)), "openSite");
-        button.Visibility = Plugin.CurrentData is { MinimalMode: true } ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private static Brush GetSecondaryBrush()
