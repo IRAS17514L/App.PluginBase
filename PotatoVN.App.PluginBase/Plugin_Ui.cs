@@ -193,7 +193,7 @@ public partial class Plugin : IGalgamePageRightPanel
         {
             Content = content,
             MaxHeight = fillHeight ? double.PositiveInfinity : 420,
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Hidden,
         };
         Grid.SetRow(status, 1);
         root.Children.Add(status);
