@@ -14,8 +14,10 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Windowing;
 using PotatoVN.App.PluginBase.Controls.Prefabs;
 using PotatoVN.App.PluginBase.Models;
+using Windows.Graphics;
 
 namespace PotatoVN.App.PluginBase;
 
@@ -31,10 +33,15 @@ public partial class Plugin : IGalgamePageRightPanel
         "https://acgfan.top",
     ];
     private static readonly HttpClient Http = CreateHttpClient();
-    private string _currentSource = "2dfan";
-    private ToggleButton? _source2dfan;
-    private ToggleButton? _sourceYmgal;
-    private ProgressRing? _progressRing;
+    private static readonly Dictionary<Guid, Window> FloatingWindows = [];
+
+    private sealed class PanelState
+    {
+        public string CurrentSource = "2dfan";
+        public ToggleButton? Source2dfan;
+        public ToggleButton? SourceYmgal;
+        public ProgressRing? ProgressRing;
+    }
 
     public FrameworkElement CreateSettingUi()
     {
@@ -88,6 +95,9 @@ public partial class Plugin : IGalgamePageRightPanel
         clearButton.Click += (_, _) => Data.TopicUrlMap.Clear();
 
         StdStackPanel panel = new();
+        ToggleSwitch autoOpenToggle = new() { IsOn = Data.AutoOpenFloatOnLaunch };
+        autoOpenToggle.Toggled += (_, _) => Data.AutoOpenFloatOnLaunch = autoOpenToggle.IsOn;
+        panel.Children.Add(new StdSetting("启动游戏时自动打开攻略浮窗", "启动游戏时自动弹出置顶攻略窗口，可拖动到游戏旁", autoOpenToggle));
         panel.Children.Add(new StdSetting("默认攻略来源",
             "自动：游戏有月幕档案编号时用月幕，否则用 2DFan。可在游戏页内手动切换单个游戏的来源。", sourceBox));
         panel.Children.Add(new StdSetting("2DFan 域名",
@@ -97,35 +107,46 @@ public partial class Plugin : IGalgamePageRightPanel
         return panel;
     }
 
-    public Task<FrameworkElement> CreateRightPanelUiAsync(Galgame game)
+    public Task<FrameworkElement> CreateRightPanelUiAsync(Galgame game) => Task.FromResult(BuildGuidePanel(game, true));
+
+    private FrameworkElement BuildGuidePanel(Galgame game, bool showFloatButton)
     {
-        _currentSource = ResolveDefaultSource(game);
+        PanelState state = new() { CurrentSource = ResolveDefaultSource(game) };
 
         TextBlock title = new() { Text = "攻略", FontSize = 15, FontWeight = FontWeights.SemiBold };
 
-        _source2dfan = new ToggleButton
+        ToggleButton source2dfan = new()
         {
             Content = "2DFan",
             MinHeight = 28,
             Padding = new Thickness(12, 3, 12, 3),
-            IsChecked = _currentSource == "2dfan",
+            IsChecked = state.CurrentSource == "2dfan",
         };
-        _sourceYmgal = new ToggleButton
+        ToggleButton sourceYmgal = new()
         {
             Content = "月幕",
             MinHeight = 28,
             Padding = new Thickness(12, 3, 12, 3),
-            IsChecked = _currentSource == "ymgal",
+            IsChecked = state.CurrentSource == "ymgal",
         };
+        state.Source2dfan = source2dfan;
+        state.SourceYmgal = sourceYmgal;
         Button refresh = new() { Content = "重新检索", MinHeight = 28, Padding = new Thickness(12, 3, 12, 3) };
-        _progressRing = new ProgressRing { Width = 16, Height = 16, IsActive = false };
+        ProgressRing progressRing = new() { Width = 16, Height = 16, IsActive = false };
+        state.ProgressRing = progressRing;
 
         StackPanel header = new() { Orientation = Orientation.Horizontal, Spacing = 6 };
         header.Children.Add(title);
-        header.Children.Add(_source2dfan);
-        header.Children.Add(_sourceYmgal);
+        header.Children.Add(source2dfan);
+        header.Children.Add(sourceYmgal);
         header.Children.Add(refresh);
-        header.Children.Add(_progressRing);
+        if (showFloatButton)
+        {
+            Button floatButton = new() { Content = "浮窗", MinHeight = 28, Padding = new Thickness(12, 3, 12, 3) };
+            floatButton.Click += (_, _) => OpenFloatingWindow(game);
+            header.Children.Add(floatButton);
+        }
+        header.Children.Add(progressRing);
 
         TextBlock status = new()
         {
@@ -145,12 +166,12 @@ public partial class Plugin : IGalgamePageRightPanel
         root.Children.Add(status);
         root.Children.Add(scroll);
 
-        _source2dfan.Click += (_, _) => _ = ShowSourceAsync(game, content, status, "2dfan");
-        _sourceYmgal.Click += (_, _) => _ = ShowSourceAsync(game, content, status, "ymgal");
-        refresh.Click += (_, _) => _ = ShowSourceAsync(game, content, status, _currentSource);
+        source2dfan.Click += (_, _) => _ = ShowSourceAsync(game, content, status, "2dfan", state);
+        sourceYmgal.Click += (_, _) => _ = ShowSourceAsync(game, content, status, "ymgal", state);
+        refresh.Click += (_, _) => _ = ShowSourceAsync(game, content, status, state.CurrentSource, state);
 
-        _ = ShowSourceAsync(game, content, status, null);
-        return Task.FromResult<FrameworkElement>(root);
+        _ = ShowSourceAsync(game, content, status, null, state);
+        return root;
     }
 
     private string ResolveDefaultSource(Galgame game) => Data.DefaultSource switch
@@ -160,14 +181,14 @@ public partial class Plugin : IGalgamePageRightPanel
         _ => !string.IsNullOrEmpty(game.Ids[(int)RssType.Ymgal]) ? "ymgal" : "2dfan",
     };
 
-    private async Task ShowSourceAsync(Galgame game, StackPanel content, TextBlock status, string? source)
+    private async Task ShowSourceAsync(Galgame game, StackPanel content, TextBlock status, string? source, PanelState state)
     {
-        if (source is not null) _currentSource = source;
-        UpdateSourceToggleState();
-        if (_progressRing is not null) _progressRing.IsActive = true;
+        if (source is not null) state.CurrentSource = source;
+        UpdateSourceToggleState(state);
+        if (state.ProgressRing is not null) state.ProgressRing.IsActive = true;
         try
         {
-            if (_currentSource == "ymgal")
+            if (state.CurrentSource == "ymgal")
             {
                 try
                 {
@@ -176,8 +197,8 @@ public partial class Plugin : IGalgamePageRightPanel
                 catch (Exception e)
                 {
                     // 月幕不可用时自动回退到 2DFan，避免玩家无攻略可用
-                    _currentSource = "2dfan";
-                    UpdateSourceToggleState();
+                    state.CurrentSource = "2dfan";
+                    UpdateSourceToggleState(state);
                     status.Text = $"月幕加载失败，已自动切换 2DFan：{e.Message}";
                     await Df2anAsync(game, content, status);
                 }
@@ -189,14 +210,58 @@ public partial class Plugin : IGalgamePageRightPanel
         }
         finally
         {
-            if (_progressRing is not null) _progressRing.IsActive = false;
+            if (state.ProgressRing is not null) state.ProgressRing.IsActive = false;
         }
     }
 
-    private void UpdateSourceToggleState()
+    private void UpdateSourceToggleState(PanelState state)
     {
-        if (_source2dfan is not null) _source2dfan.IsChecked = _currentSource == "2dfan";
-        if (_sourceYmgal is not null) _sourceYmgal.IsChecked = _currentSource == "ymgal";
+        if (state.Source2dfan is not null) state.Source2dfan.IsChecked = state.CurrentSource == "2dfan";
+        if (state.SourceYmgal is not null) state.SourceYmgal.IsChecked = state.CurrentSource == "ymgal";
+    }
+
+    private void OpenFloatingWindow(Galgame game)
+    {
+        try
+        {
+            CloseFloatingWindow(game.Uuid);
+
+            Window window = new() { Title = $"攻略 - {game.Name.Value}" };
+            StackPanel content = new() { Padding = new Thickness(8), Spacing = 6 };
+            Button closeButton = new()
+            {
+                Content = "关闭",
+                HorizontalAlignment = HorizontalAlignment.Right,
+                MinHeight = 28,
+                Padding = new Thickness(12, 3, 12, 3),
+            };
+            closeButton.Click += (_, _) => window.Close();
+            content.Children.Add(closeButton);
+            content.Children.Add(BuildGuidePanel(game, false));
+            window.Content = content;
+
+            if (window.AppWindow.Presenter is OverlappedPresenter presenter)
+            {
+                presenter.IsAlwaysOnTop = true;
+                presenter.IsMaximizable = false;
+                presenter.IsMinimizable = false;
+            }
+            window.AppWindow.Resize(new Windows.Graphics.SizeInt32(480, 700));
+
+            FloatingWindows[game.Uuid] = window;
+            window.Closed += (_, _) => FloatingWindows.Remove(game.Uuid);
+            window.Activate();
+        }
+        catch (Exception)
+        {
+            Plugin.HostApi.Info(Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning, "攻略浮窗暂不可用（宿主限制）", null, 3000);
+        }
+    }
+
+    private static void CloseFloatingWindow(Guid uuid)
+    {
+        if (FloatingWindows.TryGetValue(uuid, out Window? window))
+            window.Close();
     }
 
     #region 2DFan

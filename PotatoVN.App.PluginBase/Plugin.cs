@@ -3,9 +3,11 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Messaging;
 using GalgameManager.WinApp.Base.Contracts;
 using GalgameManager.WinApp.Base.Contracts.PluginUi;
 using GalgameManager.WinApp.Base.Models;
+using GalgameManager.WinApp.Base.Models.Msgs;
 using PotatoVN.App.PluginBase.Helper;
 using PotatoVN.App.PluginBase.Models;
 
@@ -42,11 +44,26 @@ namespace PotatoVN.App.PluginBase
                 }
             }
             Data.PropertyChanged += (_, _) => SaveData();
+            _hostApi.Messenger.Register<GalgamePlayedMessage>(this, OnGamePlayed);
+            _hostApi.Messenger.Register<GalgameStoppedMessage>(this, OnGameStopped);
+        }
+
+        private void OnGamePlayed(object recipient, GalgamePlayedMessage message)
+        {
+            if (!Data.AutoOpenFloatOnLaunch) return;
+            HostApi.InvokeOnMainThread(() => OpenFloatingWindow(message.Value));
+        }
+
+        private void OnGameStopped(object recipient, GalgameStoppedMessage message)
+        {
+            HostApi.InvokeOnMainThread(() => CloseFloatingWindow(message.Value.Uuid));
         }
 
         public Task OnUninstallAsync(bool deleteData, Action<TimeSpan> extendWaitHandler, CancellationToken cts)
         {
             if (cts.IsCancellationRequested) return Task.FromCanceled(cts);
+            _hostApi.Messenger.Unregister<GalgamePlayedMessage>(this);
+            _hostApi.Messenger.Unregister<GalgameStoppedMessage>(this);
             return Task.CompletedTask;
         }
 
@@ -72,5 +89,8 @@ namespace PotatoVN.App.PluginBase.Models
 
         /// <summary>游戏 Uuid -> 2DFan 攻略 topic 页 URL</summary>
         public Dictionary<Guid, string> TopicUrlMap { get; set; } = [];
+
+        /// <summary>启动游戏时自动打开攻略浮窗</summary>
+        [ObservableProperty] private bool _autoOpenFloatOnLaunch = true;
     }
 }
