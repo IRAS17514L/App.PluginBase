@@ -72,10 +72,24 @@ namespace PotatoVN.App.PluginBase
             {
                 if (!Data.AutoOpenFloatOnLaunch) return;
                 if (Data.ActiveGameUuid is not { } uuid || Data.ActiveGamePlayedAt is not { } playedAt) return;
-                // 宿主重启耗时通常几秒；超过 15 分钟视为过期，避免误开
+                // 仅宿主重启（SystemTray 游玩模式的 /r 重启）后恢复；正常启动一律不弹
+                if (Environment.GetCommandLineArgs().Any(a => a == "/r") == false)
+                {
+                    Data.ActiveGameUuid = null;
+                    Data.ActiveGamePlayedAt = null;
+                    return;
+                }
+                // 超 15 分钟视为过期
                 if (DateTime.Now - playedAt > TimeSpan.FromMinutes(15)) return;
                 Galgame? game = _hostApi.GetAllGames().FirstOrDefault(g => g.Uuid == uuid);
                 if (game is null) return;
+                // 游戏进程必须真的在跑，否则是残留状态，清掉
+                if (!IsGameProcessRunning(game))
+                {
+                    Data.ActiveGameUuid = null;
+                    Data.ActiveGamePlayedAt = null;
+                    return;
+                }
                 await Task.Delay(1500); // 等宿主界面稳定
                 HostApi.InvokeOnMainThread(() => OpenFloatingWindow(game));
             }
