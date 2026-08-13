@@ -112,9 +112,9 @@ public partial class Plugin : IGalgamePageRightPanel
         return panel;
     }
 
-    public Task<FrameworkElement> CreateRightPanelUiAsync(Galgame game) => Task.FromResult(BuildGuidePanel(game, true, true, false, out _));
+    public Task<FrameworkElement> CreateRightPanelUiAsync(Galgame game) => Task.FromResult(BuildGuidePanel(game, true, true, false, out _, out _));
 
-    private FrameworkElement BuildGuidePanel(Galgame game, bool showFloatButton, bool showHeader, bool fillHeight, out FrameworkElement? header)
+    private FrameworkElement BuildGuidePanel(Galgame game, bool showFloatButton, bool showHeader, bool fillHeight, out FrameworkElement? header, out StackPanel contentPanel)
     {
         PanelState state = new() { CurrentSource = ResolveDefaultSource(game) };
 
@@ -125,6 +125,7 @@ public partial class Plugin : IGalgamePageRightPanel
             Foreground = GetSecondaryBrush(),
         };
         StackPanel content = new() { Spacing = 4 };
+        contentPanel = content;
 
         StackPanel root = new() { Spacing = 8, MaxWidth = 380 };
         header = null;
@@ -247,7 +248,7 @@ public partial class Plugin : IGalgamePageRightPanel
                 presenter.IsMinimizable = false;
             }
 
-            FrameworkElement panel = BuildGuidePanel(game, false, true, true, out FrameworkElement? header);
+            FrameworkElement panel = BuildGuidePanel(game, false, true, true, out FrameworkElement? header, out StackPanel contentPanel);
 
             // 极简/展开切换按钮（低透明度，不影响观看）
             Button expandButton = new()
@@ -292,9 +293,13 @@ public partial class Plugin : IGalgamePageRightPanel
                 pinButton.Visibility = minimal ? Visibility.Collapsed : Visibility.Visible;
                 closeButton.Visibility = minimal ? Visibility.Collapsed : Visibility.Visible;
                 if (header is not null) header.Visibility = minimal ? Visibility.Collapsed : Visibility.Visible;
+                foreach (var child in contentPanel.Children)
+                    if (child is FrameworkElement fe && fe.Tag as string == "openSite")
+                        fe.Visibility = minimal ? Visibility.Collapsed : Visibility.Visible;
                 window.AppWindow.Resize(minimal
                     ? new Windows.Graphics.SizeInt32(300, 380)   // 小窗模式
                     : new Windows.Graphics.SizeInt32(480, 700)); // 完整模式
+                ApplyTitleBar(window, minimal);
             }
 
             void UpdatePinState()
@@ -372,6 +377,31 @@ public partial class Plugin : IGalgamePageRightPanel
     {
         if (FloatingWindows.Remove(uuid, out Window? window))
             window.AppWindow.Hide();
+    }
+
+    private static void ApplyTitleBar(Window window, bool minimal)
+    {
+        try
+        {
+            var titleBar = window.AppWindow.TitleBar;
+            if (minimal)
+            {
+                titleBar.ExtendsContentIntoTitleBar = true; // 必须先在设置 PreferredHeightOption 前
+                try { titleBar.PreferredHeightOption = TitleBarHeightOption.Collapsed; } catch { } // Win10 不支持则忽略
+                // 拖拽区：顶部条，排除右侧展开按钮（约 64px）
+                int width = window.AppWindow.Size.Width;
+                titleBar.SetDragRectangles([new Windows.Graphics.RectInt32(0, 0, Math.Max(0, width - 64), 28)]);
+            }
+            else
+            {
+                titleBar.ExtendsContentIntoTitleBar = false; // 恢复系统标题栏
+                try { titleBar.PreferredHeightOption = TitleBarHeightOption.Standard; } catch { }
+            }
+        }
+        catch (Exception)
+        {
+            // 标题栏设置失败不影响功能
+        }
     }
 
     private async Task FloatWatchdogAsync(Galgame game)
@@ -709,13 +739,14 @@ public partial class Plugin : IGalgamePageRightPanel
         if (url is not null) AddOpenSiteButton(content, url);
     }
 
-    private static void AddResultRow(StackPanel content, int index, string text, Action onClick)
+    private static void AddResultRow(StackPanel content, int index, string text, Action onClick, string? tag = null)
     {
         Button button = new()
         {
             HorizontalAlignment = HorizontalAlignment.Stretch,
             HorizontalContentAlignment = HorizontalAlignment.Left,
             Padding = new Thickness(8, 4, 8, 4),
+            Tag = tag,
             Content = new TextBlock
             {
                 Text = index > 0 ? $"{index}. {text}" : text,
@@ -730,7 +761,7 @@ public partial class Plugin : IGalgamePageRightPanel
     }
 
     private static void AddOpenSiteButton(StackPanel content, string url)
-        => AddResultRow(content, 0, "在浏览器打开站点页面", () => _ = Windows.System.Launcher.LaunchUriAsync(new Uri(url)));
+        => AddResultRow(content, 0, "在浏览器打开站点页面", () => _ = Windows.System.Launcher.LaunchUriAsync(new Uri(url)), "openSite");
 
     private static Brush GetSecondaryBrush()
     {
