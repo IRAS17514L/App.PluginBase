@@ -46,6 +46,7 @@ public partial class Plugin : IGalgamePageRightPanel
         public TextBlock? Status;
         public Button? BackButton;
         public Button? OverlayBackButton;
+        public Button? PanelHeaderBackButton;
         public Stack<(string StatusText, UIElement[] Children)> BackStack = [];
     }
 
@@ -169,6 +170,20 @@ public partial class Plugin : IGalgamePageRightPanel
             panelState.ProgressRing = progressRing;
 
             StackPanel headerPanel = new() { Orientation = Orientation.Horizontal, Spacing = 6 };
+            if (showFloatButton) // 详情页场景：浮窗有自己的 bar/叠加层返回按钮，详情页需要这里
+            {
+                Button backButton = new()
+                {
+                    Content = CreateGlyphIcon("\uE72B"),
+                    MinHeight = 28,
+                    Padding = new Thickness(12, 3, 12, 3),
+                    Visibility = Visibility.Collapsed,
+                };
+                ToolTipService.SetToolTip(backButton, "返回");
+                backButton.Click += (_, _) => PopBack(panelState);
+                panelState.PanelHeaderBackButton = backButton;
+                headerPanel.Children.Add(backButton);
+            }
             headerPanel.Children.Add(title);
             headerPanel.Children.Add(source2dfan);
             headerPanel.Children.Add(sourceYmgal);
@@ -254,6 +269,7 @@ public partial class Plugin : IGalgamePageRightPanel
     {
         if (state.BackButton is not null) state.BackButton.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
         if (state.OverlayBackButton is not null) state.OverlayBackButton.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        if (state.PanelHeaderBackButton is not null) state.PanelHeaderBackButton.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private static void PushBack(PanelState state)
