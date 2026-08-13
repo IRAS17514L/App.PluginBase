@@ -163,5 +163,8 @@ namespace PotatoVN.App.PluginBase.Models
 
         /// <summary>浮窗是否默认置顶</summary>
         [ObservableProperty] private bool _pinFloatOnTop = true;
+
+        /// <summary>极简模式：浮窗只显示攻略内容与一个切换按钮</summary>
+        [ObservableProperty] private bool _minimalMode = false;
     }
 }
