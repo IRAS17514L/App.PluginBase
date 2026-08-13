@@ -42,6 +42,10 @@ public partial class Plugin : IGalgamePageRightPanel
         public ToggleButton? Source2dfan;
         public ToggleButton? SourceYmgal;
         public ProgressRing? ProgressRing;
+        public StackPanel? Content;
+        public TextBlock? Status;
+        public Button? BackButton;
+        public Stack<(string StatusText, UIElement[] Children)> BackStack = [];
     }
 
     public FrameworkElement CreateSettingUi()
@@ -114,9 +118,10 @@ public partial class Plugin : IGalgamePageRightPanel
 
     public Task<FrameworkElement> CreateRightPanelUiAsync(Galgame game) => Task.FromResult(BuildGuidePanel(game, true, true, false, out _, out _));
 
-    private FrameworkElement BuildGuidePanel(Galgame game, bool showFloatButton, bool showHeader, bool fillHeight, out FrameworkElement? header, out StackPanel contentPanel)
+    private FrameworkElement BuildGuidePanel(Galgame game, bool showFloatButton, bool showHeader, bool fillHeight, out FrameworkElement? header, out PanelState state)
     {
-        PanelState state = new() { CurrentSource = ResolveDefaultSource(game) };
+        state = new() { CurrentSource = ResolveDefaultSource(game) };
+        PanelState panelState = state;
 
         TextBlock status = new()
         {
@@ -125,7 +130,8 @@ public partial class Plugin : IGalgamePageRightPanel
             Foreground = GetSecondaryBrush(),
         };
         StackPanel content = new() { Spacing = 4 };
-        contentPanel = content;
+        panelState.Content = content;
+        panelState.Status = status;
 
         StackPanel root = new() { Spacing = 8, MaxWidth = 380 };
         header = null;
@@ -138,20 +144,20 @@ public partial class Plugin : IGalgamePageRightPanel
                 Content = "2DFan",
                 MinHeight = 28,
                 Padding = new Thickness(12, 3, 12, 3),
-                IsChecked = state.CurrentSource == "2dfan",
+                IsChecked = panelState.CurrentSource == "2dfan",
             };
             ToggleButton sourceYmgal = new()
             {
                 Content = "月幕",
                 MinHeight = 28,
                 Padding = new Thickness(12, 3, 12, 3),
-                IsChecked = state.CurrentSource == "ymgal",
+                IsChecked = panelState.CurrentSource == "ymgal",
             };
-            state.Source2dfan = source2dfan;
-            state.SourceYmgal = sourceYmgal;
+            panelState.Source2dfan = source2dfan;
+            panelState.SourceYmgal = sourceYmgal;
             Button refresh = new() { Content = "重新检索", MinHeight = 28, Padding = new Thickness(12, 3, 12, 3) };
             ProgressRing progressRing = new() { Width = 16, Height = 16, IsActive = false };
-            state.ProgressRing = progressRing;
+            panelState.ProgressRing = progressRing;
 
             StackPanel headerPanel = new() { Orientation = Orientation.Horizontal, Spacing = 6 };
             headerPanel.Children.Add(title);
@@ -168,9 +174,9 @@ public partial class Plugin : IGalgamePageRightPanel
             root.Children.Add(headerPanel);
             header = headerPanel;
 
-            source2dfan.Click += (_, _) => _ = ShowSourceAsync(game, content, status, "2dfan", state);
-            sourceYmgal.Click += (_, _) => _ = ShowSourceAsync(game, content, status, "ymgal", state);
-            refresh.Click += (_, _) => _ = ShowSourceAsync(game, content, status, state.CurrentSource, state);
+            source2dfan.Click += (_, _) => _ = ShowSourceAsync(game, content, status, "2dfan", panelState);
+            sourceYmgal.Click += (_, _) => _ = ShowSourceAsync(game, content, status, "ymgal", panelState);
+            refresh.Click += (_, _) => _ = ShowSourceAsync(game, content, status, panelState.CurrentSource, panelState);
         }
 
         ScrollViewer scroll = new()
@@ -182,7 +188,7 @@ public partial class Plugin : IGalgamePageRightPanel
         root.Children.Add(status);
         root.Children.Add(scroll);
 
-        _ = ShowSourceAsync(game, content, status, null, state);
+        _ = ShowSourceAsync(game, content, status, null, panelState);
         return root;
     }
 
@@ -204,7 +210,7 @@ public partial class Plugin : IGalgamePageRightPanel
             {
                 try
                 {
-                    await YmgalAsync(game, content, status);
+                    await YmgalAsync(game, content, status, state);
                 }
                 catch (Exception e)
                 {
@@ -212,12 +218,12 @@ public partial class Plugin : IGalgamePageRightPanel
                     state.CurrentSource = "2dfan";
                     UpdateSourceToggleState(state);
                     status.Text = $"月幕加载失败，已自动切换 2DFan：{e.Message}";
-                    await Df2anAsync(game, content, status);
+                    await Df2anAsync(game, content, status, state);
                 }
             }
             else
             {
-                await Df2anAsync(game, content, status);
+                await Df2anAsync(game, content, status, state);
             }
         }
         finally
@@ -230,6 +236,23 @@ public partial class Plugin : IGalgamePageRightPanel
     {
         if (state.Source2dfan is not null) state.Source2dfan.IsChecked = state.CurrentSource == "2dfan";
         if (state.SourceYmgal is not null) state.SourceYmgal.IsChecked = state.CurrentSource == "ymgal";
+    }
+
+    private static void PushBack(PanelState state)
+    {
+        if (state.Content is null || state.Status is null) return;
+        state.BackStack.Push((state.Status.Text, state.Content.Children.ToArray()));
+        if (state.BackButton is not null) state.BackButton.Visibility = Visibility.Visible;
+    }
+
+    private static void PopBack(PanelState state)
+    {
+        if (state.Content is null || state.Status is null || state.BackButton is null || state.BackStack.Count == 0) return;
+        var (statusText, children) = state.BackStack.Pop();
+        state.Content.Children.Clear();
+        foreach (var child in children) state.Content.Children.Add(child);
+        state.Status.Text = statusText;
+        state.BackButton.Visibility = state.BackStack.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void OpenFloatingWindow(Galgame game)
@@ -248,7 +271,19 @@ public partial class Plugin : IGalgamePageRightPanel
                 presenter.IsMinimizable = false;
             }
 
-            FrameworkElement panel = BuildGuidePanel(game, false, true, true, out FrameworkElement? header, out StackPanel contentPanel);
+            FrameworkElement panel = BuildGuidePanel(game, false, true, true, out FrameworkElement? header, out PanelState state);
+            PanelState panelState = state;
+
+            // 返回按钮（返回上一层，选错攻略可回退）
+            Button backButton = new()
+            {
+                Content = "←",
+                MinHeight = 24,
+                Padding = new Thickness(8, 2, 8, 2),
+                Visibility = Visibility.Collapsed,
+            };
+            backButton.Click += (_, _) => PopBack(panelState);
+            panelState.BackButton = backButton;
 
             // 极简/展开切换按钮（低透明度，不影响观看）
             Button expandButton = new()
@@ -280,6 +315,7 @@ public partial class Plugin : IGalgamePageRightPanel
                 Spacing = 6,
                 HorizontalAlignment = HorizontalAlignment.Right,
             };
+            bar.Children.Add(backButton);
             bar.Children.Add(expandButton);
             bar.Children.Add(minimalButton);
             bar.Children.Add(pinButton);
@@ -288,14 +324,16 @@ public partial class Plugin : IGalgamePageRightPanel
             void ApplyMode()
             {
                 bool minimal = Data.MinimalMode;
+                backButton.Visibility = panelState.BackStack.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
                 expandButton.Visibility = minimal ? Visibility.Visible : Visibility.Collapsed;
                 minimalButton.Visibility = minimal ? Visibility.Collapsed : Visibility.Visible;
                 pinButton.Visibility = minimal ? Visibility.Collapsed : Visibility.Visible;
                 closeButton.Visibility = minimal ? Visibility.Collapsed : Visibility.Visible;
                 if (header is not null) header.Visibility = minimal ? Visibility.Collapsed : Visibility.Visible;
-                foreach (var child in contentPanel.Children)
-                    if (child is FrameworkElement fe && fe.Tag as string == "openSite")
-                        fe.Visibility = minimal ? Visibility.Collapsed : Visibility.Visible;
+                if (panelState.Content is not null)
+                    foreach (var child in panelState.Content.Children)
+                        if (child is FrameworkElement fe && fe.Tag as string == "openSite")
+                            fe.Visibility = minimal ? Visibility.Collapsed : Visibility.Visible;
                 window.AppWindow.Resize(minimal
                     ? new Windows.Graphics.SizeInt32(300, 380)   // 小窗模式
                     : new Windows.Graphics.SizeInt32(480, 700)); // 完整模式
@@ -384,19 +422,12 @@ public partial class Plugin : IGalgamePageRightPanel
         try
         {
             var titleBar = window.AppWindow.TitleBar;
-            if (minimal)
-            {
-                titleBar.ExtendsContentIntoTitleBar = true; // 必须先在设置 PreferredHeightOption 前
-                try { titleBar.PreferredHeightOption = TitleBarHeightOption.Collapsed; } catch { } // Win10 不支持则忽略
-                // 拖拽区：顶部条，排除右侧展开按钮（约 64px）
-                int width = window.AppWindow.Size.Width;
-                titleBar.SetDragRectangles([new Windows.Graphics.RectInt32(0, 0, Math.Max(0, width - 64), 28)]);
-            }
-            else
-            {
-                titleBar.ExtendsContentIntoTitleBar = false; // 恢复系统标题栏
-                try { titleBar.PreferredHeightOption = TitleBarHeightOption.Standard; } catch { }
-            }
+            titleBar.ExtendsContentIntoTitleBar = true;
+            try { titleBar.PreferredHeightOption = TitleBarHeightOption.Collapsed; } catch { } // Win10 忽略
+            // 拖拽区：顶部 28px，排除右侧按钮区（极简排除 64px，完整排除 240px）
+            int width = window.AppWindow.Size.Width;
+            int rightExclude = minimal ? 64 : 240;
+            titleBar.SetDragRectangles([new Windows.Graphics.RectInt32(0, 0, Math.Max(0, width - rightExclude), 28)]);
         }
         catch (Exception)
         {
@@ -494,7 +525,7 @@ public partial class Plugin : IGalgamePageRightPanel
 
     #region 2DFan
 
-    private async Task Df2anAsync(Galgame game, StackPanel content, TextBlock status)
+    private async Task Df2anAsync(Galgame game, StackPanel content, TextBlock status, PanelState state)
     {
         status.Text = "加载中…";
         content.Children.Clear();
@@ -507,7 +538,7 @@ public partial class Plugin : IGalgamePageRightPanel
                 await ShowTopicAsync(url, content, status);
                 return;
             }
-            await SearchAndShowAsync(game, content, status);
+            await SearchAndShowAsync(game, content, status, state);
         }
         catch (Exception e)
         {
@@ -515,7 +546,7 @@ public partial class Plugin : IGalgamePageRightPanel
         }
     }
 
-    private async Task SearchAndShowAsync(Galgame game, StackPanel content, TextBlock status)
+    private async Task SearchAndShowAsync(Galgame game, StackPanel content, TextBlock status, PanelState state)
     {
         string query = BuildQuery(game);
         status.Text = $"正在 2DFan 检索：{query}";
@@ -535,6 +566,7 @@ public partial class Plugin : IGalgamePageRightPanel
                 (string title, string url) = subjects[i];
                 AddResultRow(content, i + 1, title, async () =>
                 {
+                    PushBack(state);
                     content.Children.Clear();
                     status.Text = $"正在获取「{title}」的攻略…";
                     try
@@ -551,6 +583,7 @@ public partial class Plugin : IGalgamePageRightPanel
                             (string topicTitle, string topicUrl) = topics[j];
                             AddResultRow(content, j + 1, topicTitle, async () =>
                             {
+                                PushBack(state);
                                 Data.TopicUrlMap[game.Uuid] = topicUrl;
                                 SaveData();
                                 await ShowTopicAsync(topicUrl, content, status);
@@ -643,7 +676,7 @@ public partial class Plugin : IGalgamePageRightPanel
 
     #region 月幕 ymgal
 
-    private async Task YmgalAsync(Galgame game, StackPanel content, TextBlock status)
+    private async Task YmgalAsync(Galgame game, StackPanel content, TextBlock status, PanelState state)
     {
         content.Children.Clear();
         string? gidStr = game.Ids[(int)RssType.Ymgal];
@@ -666,6 +699,7 @@ public partial class Plugin : IGalgamePageRightPanel
             (string title, string url) = articles[i];
             AddResultRow(content, i + 1, title, async () =>
             {
+                PushBack(state);
                 content.Children.Clear();
                 status.Text = $"正在加载「{title}」…";
                 string text = await GetYmgalArticleTextAsync(url);
