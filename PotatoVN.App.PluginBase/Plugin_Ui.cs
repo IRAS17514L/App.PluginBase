@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Net.Http;
+using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -251,6 +252,7 @@ public partial class Plugin : IGalgamePageRightPanel
             FloatingWindows[game.Uuid] = window;
             window.Closed += (_, _) => FloatingWindows.Remove(game.Uuid);
             window.Activate();
+            _ = BumpTopmostAfterMagpieAsync(window);
         }
         catch (Exception)
         {
@@ -263,6 +265,30 @@ public partial class Plugin : IGalgamePageRightPanel
         if (FloatingWindows.TryGetValue(uuid, out Window? window))
             window.Close();
     }
+
+    private static async Task BumpTopmostAfterMagpieAsync(Window window)
+    {
+        try
+        {
+            await Task.Delay(3500);
+            IntPtr hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
+            SetWindowPos(hwnd, HwndTopmost, 0, 0, 0, 0, SwpNoMove | SwpNoSize | SwpNoActivate | SwpShowWindow);
+        }
+        catch
+        {
+            // 窗口已关闭，忽略
+        }
+    }
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
+
+    private static readonly IntPtr HwndTopmost = new(-1);
+    private const uint SwpNoSize = 0x0001;
+    private const uint SwpNoMove = 0x0002;
+    private const uint SwpNoActivate = 0x0010;
+    private const uint SwpShowWindow = 0x0040;
 
     #region 2DFan
 
