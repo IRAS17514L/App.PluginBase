@@ -312,8 +312,9 @@ public partial class Plugin : IGalgamePageRightPanel
             {
                 Glyph = Data.PinFloatOnTop ? "\uE718" : "\uE77A",
                 FontFamily = new FontFamily("Segoe Fluent Icons,Segoe MDL2 Assets"),
+                FontSize = 12,
             };
-            ToggleButton pinButton = new() { MinHeight = 24, IsChecked = Data.PinFloatOnTop };
+            ToggleButton pinButton = new() { MinHeight = 24, Padding = new Thickness(8, 2, 8, 2), IsChecked = Data.PinFloatOnTop };
             pinButton.Content = pinIcon;
 
             // 关闭（隐藏式，避免最后一个窗口导致应用退出）
