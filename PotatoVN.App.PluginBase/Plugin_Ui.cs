@@ -331,30 +331,50 @@ public partial class Plugin : IGalgamePageRightPanel
             if (!FloatingWindows.ContainsKey(game.Uuid)) return;
             // 手动打开（非活跃游戏）的窗口不由看门狗关闭
             if (Data.ActiveGameUuid != game.Uuid) return;
-            if (IsGameProcessRunning(game)) continue;
+            if (await IsGameProcessRunningAsync(game)) continue;
             DismissFloatWindow(game.Uuid);
             return;
         }
     }
 
-    private static bool IsGameProcessRunning(Galgame game)
+    private static Task<bool> IsGameProcessRunningAsync(Galgame game)
     {
         string? installPath = game.LocalPath;
-        if (string.IsNullOrEmpty(installPath)) return true; // 无法判断 → 假定运行中，交给宿主消息
-        foreach (System.Diagnostics.Process process in System.Diagnostics.Process.GetProcesses())
+        if (string.IsNullOrEmpty(installPath)) return Task.FromResult(true); // 无法判断 → 假定运行中，交给宿主消息
+        return Task.Run(() =>
         {
-            try
+            foreach (System.Diagnostics.Process process in System.Diagnostics.Process.GetProcesses())
             {
-                string? file = process.MainModule?.FileName;
-                if (file is null) continue;
-                if (file.StartsWith(installPath, StringComparison.OrdinalIgnoreCase)) return true;
+                try
+                {
+                    string? file = TryGetProcessPath(process.Id);
+                    if (file is not null && file.StartsWith(installPath, StringComparison.OrdinalIgnoreCase))
+                        return true;
+                }
+                catch
+                {
+                    // 单个进程查询失败不影响整体
+                }
             }
-            catch
-            {
-                // 权限受限进程，跳过
-            }
+            return false;
+        });
+    }
+
+    private static string? TryGetProcessPath(int processId)
+    {
+        IntPtr handle = OpenProcess(0x1000 /*PROCESS_QUERY_LIMITED_INFORMATION*/, false, processId);
+        if (handle == IntPtr.Zero) return null;
+        try
+        {
+            var buffer = new System.Text.StringBuilder(1024);
+            uint size = (uint)buffer.Capacity;
+            if (QueryFullProcessImageName(handle, 0, buffer, ref size)) return buffer.ToString();
         }
-        return false;
+        finally
+        {
+            CloseHandle(handle);
+        }
+        return null;
     }
 
     private static async Task BumpTopmostAfterMagpieAsync(Window window)
@@ -375,6 +395,15 @@ public partial class Plugin : IGalgamePageRightPanel
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint desiredAccess, bool inheritHandle, int processId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr hObject);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool QueryFullProcessImageName(IntPtr hProcess, uint flags, System.Text.StringBuilder exeName, ref uint size);
 
     private static readonly IntPtr HwndTopmost = new(-1);
     private const uint SwpNoSize = 0x0001;

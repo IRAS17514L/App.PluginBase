@@ -86,7 +86,7 @@ namespace PotatoVN.App.PluginBase
                 Galgame? game = _hostApi.GetAllGames().FirstOrDefault(g => g.Uuid == uuid);
                 if (game is null) return;
                 // 游戏进程必须真的在跑，否则是残留状态，清掉
-                if (!IsGameProcessRunning(game))
+                if (!await IsGameProcessRunningAsync(game))
                 {
                     Data.ActiveGameUuid = null;
                     Data.ActiveGamePlayedAt = null;
