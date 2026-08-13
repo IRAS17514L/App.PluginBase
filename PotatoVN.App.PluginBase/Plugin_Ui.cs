@@ -112,9 +112,9 @@ public partial class Plugin : IGalgamePageRightPanel
         return panel;
     }
 
-    public Task<FrameworkElement> CreateRightPanelUiAsync(Galgame game) => Task.FromResult(BuildGuidePanel(game, true, true, out _));
+    public Task<FrameworkElement> CreateRightPanelUiAsync(Galgame game) => Task.FromResult(BuildGuidePanel(game, true, true, false, out _));
 
-    private FrameworkElement BuildGuidePanel(Galgame game, bool showFloatButton, bool showHeader, out FrameworkElement? header)
+    private FrameworkElement BuildGuidePanel(Galgame game, bool showFloatButton, bool showHeader, bool fillHeight, out FrameworkElement? header)
     {
         PanelState state = new() { CurrentSource = ResolveDefaultSource(game) };
 
@@ -175,7 +175,7 @@ public partial class Plugin : IGalgamePageRightPanel
         ScrollViewer scroll = new()
         {
             Content = content,
-            MaxHeight = 420,
+            MaxHeight = fillHeight ? double.PositiveInfinity : 420,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
         };
         root.Children.Add(status);
@@ -247,7 +247,7 @@ public partial class Plugin : IGalgamePageRightPanel
                 presenter.IsMinimizable = false;
             }
 
-            FrameworkElement panel = BuildGuidePanel(game, false, true, out FrameworkElement? header);
+            FrameworkElement panel = BuildGuidePanel(game, false, true, true, out FrameworkElement? header);
 
             // 极简/展开切换按钮（低透明度，不影响观看）
             Button expandButton = new()
@@ -292,6 +292,9 @@ public partial class Plugin : IGalgamePageRightPanel
                 pinButton.Visibility = minimal ? Visibility.Collapsed : Visibility.Visible;
                 closeButton.Visibility = minimal ? Visibility.Collapsed : Visibility.Visible;
                 if (header is not null) header.Visibility = minimal ? Visibility.Collapsed : Visibility.Visible;
+                window.AppWindow.Resize(minimal
+                    ? new Windows.Graphics.SizeInt32(300, 380)   // 小窗模式
+                    : new Windows.Graphics.SizeInt32(480, 700)); // 完整模式
             }
 
             void UpdatePinState()
@@ -307,11 +310,16 @@ public partial class Plugin : IGalgamePageRightPanel
             pinButton.Unchecked += (_, _) => UpdatePinState();
             closeButton.Click += (_, _) => DismissFloatWindow(game.Uuid);
 
-            StackPanel shell = new() { Spacing = 2, Padding = new Thickness(4) }; // 收紧空白
+            Grid shell = new() { Padding = new Thickness(4) };
+            shell.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            shell.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
             shell.Children.Add(bar);
+            Grid.SetRow(bar, 0);
             shell.Children.Add(panel);
+            Grid.SetRow(panel, 1);
             panel.MaxWidth = double.PositiveInfinity; // 填满窗口宽，消除侧边空白
             panel.HorizontalAlignment = HorizontalAlignment.Stretch;
+            panel.VerticalAlignment = VerticalAlignment.Stretch;
 
             try
             {
