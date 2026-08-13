@@ -112,9 +112,9 @@ public partial class Plugin : IGalgamePageRightPanel
         return panel;
     }
 
-    public Task<FrameworkElement> CreateRightPanelUiAsync(Galgame game) => Task.FromResult(BuildGuidePanel(game, true));
+    public Task<FrameworkElement> CreateRightPanelUiAsync(Galgame game) => Task.FromResult(BuildGuidePanel(game, true, true, out _));
 
-    private FrameworkElement BuildGuidePanel(Galgame game, bool showFloatButton, bool showHeader = true)
+    private FrameworkElement BuildGuidePanel(Galgame game, bool showFloatButton, bool showHeader, out FrameworkElement? header)
     {
         PanelState state = new() { CurrentSource = ResolveDefaultSource(game) };
 
@@ -127,6 +127,7 @@ public partial class Plugin : IGalgamePageRightPanel
         StackPanel content = new() { Spacing = 4 };
 
         StackPanel root = new() { Spacing = 8, MaxWidth = 380 };
+        header = null;
         if (showHeader)
         {
             TextBlock title = new() { Text = "攻略", FontSize = 15, FontWeight = FontWeights.SemiBold };
@@ -151,19 +152,20 @@ public partial class Plugin : IGalgamePageRightPanel
             ProgressRing progressRing = new() { Width = 16, Height = 16, IsActive = false };
             state.ProgressRing = progressRing;
 
-            StackPanel header = new() { Orientation = Orientation.Horizontal, Spacing = 6 };
-            header.Children.Add(title);
-            header.Children.Add(source2dfan);
-            header.Children.Add(sourceYmgal);
-            header.Children.Add(refresh);
+            StackPanel headerPanel = new() { Orientation = Orientation.Horizontal, Spacing = 6 };
+            headerPanel.Children.Add(title);
+            headerPanel.Children.Add(source2dfan);
+            headerPanel.Children.Add(sourceYmgal);
+            headerPanel.Children.Add(refresh);
             if (showFloatButton)
             {
                 Button floatButton = new() { Content = "浮窗", MinHeight = 28, Padding = new Thickness(12, 3, 12, 3) };
                 floatButton.Click += (_, _) => OpenFloatingWindow(game);
-                header.Children.Add(floatButton);
+                headerPanel.Children.Add(floatButton);
             }
-            header.Children.Add(progressRing);
-            root.Children.Add(header);
+            headerPanel.Children.Add(progressRing);
+            root.Children.Add(headerPanel);
+            header = headerPanel;
 
             source2dfan.Click += (_, _) => _ = ShowSourceAsync(game, content, status, "2dfan", state);
             sourceYmgal.Click += (_, _) => _ = ShowSourceAsync(game, content, status, "ymgal", state);
@@ -245,18 +247,81 @@ public partial class Plugin : IGalgamePageRightPanel
                 presenter.IsMinimizable = false;
             }
 
+            FrameworkElement panel = BuildGuidePanel(game, false, true, out FrameworkElement? header);
+
+            // 极简/展开切换按钮（低透明度，不影响观看）
+            Button expandButton = new()
+            {
+                Content = "展开",
+                MinHeight = 24,
+                Padding = new Thickness(8, 2, 8, 2),
+                Opacity = 0.45,
+            };
+
+            // 极简按钮（完整模式回极简）
+            Button minimalButton = new() { Content = "极简", MinHeight = 24, Padding = new Thickness(8, 2, 8, 2) };
+
+            // 钉子置顶
+            FontIcon pinIcon = new()
+            {
+                Glyph = Data.PinFloatOnTop ? "\uE718" : "\uE77A",
+                FontFamily = new FontFamily("Segoe Fluent Icons,Segoe MDL2 Assets"),
+            };
+            ToggleButton pinButton = new() { MinHeight = 24, IsChecked = Data.PinFloatOnTop };
+            pinButton.Content = pinIcon;
+
+            // 关闭（隐藏式，避免最后一个窗口导致应用退出）
+            Button closeButton = new() { Content = "关闭", MinHeight = 24, Padding = new Thickness(8, 2, 8, 2) };
+
+            StackPanel bar = new()
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 6,
+                HorizontalAlignment = HorizontalAlignment.Right,
+            };
+            bar.Children.Add(expandButton);
+            bar.Children.Add(minimalButton);
+            bar.Children.Add(pinButton);
+            bar.Children.Add(closeButton);
+
+            void ApplyMode()
+            {
+                bool minimal = Data.MinimalMode;
+                expandButton.Visibility = minimal ? Visibility.Visible : Visibility.Collapsed;
+                minimalButton.Visibility = minimal ? Visibility.Collapsed : Visibility.Visible;
+                pinButton.Visibility = minimal ? Visibility.Collapsed : Visibility.Visible;
+                closeButton.Visibility = minimal ? Visibility.Collapsed : Visibility.Visible;
+                if (header is not null) header.Visibility = minimal ? Visibility.Collapsed : Visibility.Visible;
+            }
+
+            void UpdatePinState()
+            {
+                pinIcon.Glyph = pinButton.IsChecked == true ? "\uE718" : "\uE77A";
+                if (presenter is not null) presenter.IsAlwaysOnTop = pinButton.IsChecked == true;
+                Data.PinFloatOnTop = pinButton.IsChecked == true;
+            }
+
+            expandButton.Click += (_, _) => { Data.MinimalMode = false; ApplyMode(); };
+            minimalButton.Click += (_, _) => { Data.MinimalMode = true; ApplyMode(); };
+            pinButton.Checked += (_, _) => UpdatePinState();
+            pinButton.Unchecked += (_, _) => UpdatePinState();
+            closeButton.Click += (_, _) => DismissFloatWindow(game.Uuid);
+
+            StackPanel shell = new() { Spacing = 2, Padding = new Thickness(4) }; // 收紧空白
+            shell.Children.Add(bar);
+            shell.Children.Add(panel);
+            panel.MaxWidth = double.PositiveInfinity; // 填满窗口宽，消除侧边空白
+            panel.HorizontalAlignment = HorizontalAlignment.Stretch;
+
             try
             {
                 window.SystemBackdrop = new MicaBackdrop();
             }
-            catch (Exception)
-            {
-                // Mica 不受支持（如 Win10）时忽略，保持默认背景
-            }
-            window.Content = BuildFloatContent(window, game);
+            catch (Exception) { }
+
+            window.Content = shell;
 
             window.AppWindow.Resize(new Windows.Graphics.SizeInt32(480, 700));
-
             FloatingWindows[game.Uuid] = window;
             window.Closed += (_, _) => FloatingWindows.Remove(game.Uuid);
             try
@@ -271,96 +336,12 @@ public partial class Plugin : IGalgamePageRightPanel
             window.Activate();
             if (Data.PinFloatOnTop) _ = BumpTopmostAfterMagpieAsync(window);
             _ = FloatWatchdogAsync(game);
+            ApplyMode(); // 初始按数据应用
         }
         catch (Exception)
         {
             Plugin.HostApi.Info(Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning, "攻略浮窗暂不可用（宿主限制）", null, 3000);
         }
-    }
-
-    private FrameworkElement BuildFloatContent(Window window, Galgame game)
-        => Data.MinimalMode ? BuildMinimalFloatContent(window, game) : BuildNormalFloatContent(window, game);
-
-    private FrameworkElement BuildNormalFloatContent(Window window, Galgame game)
-    {
-        OverlappedPresenter? presenter = window.AppWindow.Presenter as OverlappedPresenter;
-
-        FontIcon pinIcon = new()
-        {
-            Glyph = Data.PinFloatOnTop ? "\uE718" : "\uE77A",
-            FontFamily = new FontFamily("Segoe Fluent Icons,Segoe MDL2 Assets"),
-        };
-        ToggleButton pinButton = new()
-        {
-            MinHeight = 28,
-            IsChecked = Data.PinFloatOnTop,
-        };
-        pinButton.Content = pinIcon;
-        void UpdatePinState()
-        {
-            pinIcon.Glyph = pinButton.IsChecked == true ? "\uE718" : "\uE77A";
-            if (presenter is not null) presenter.IsAlwaysOnTop = pinButton.IsChecked == true;
-            Data.PinFloatOnTop = pinButton.IsChecked == true;
-        }
-        pinButton.Checked += (_, _) => UpdatePinState();
-        pinButton.Unchecked += (_, _) => UpdatePinState();
-
-        Button minimalButton = new()
-        {
-            Content = "极简",
-            MinHeight = 28,
-            Padding = new Thickness(12, 3, 12, 3),
-        };
-        minimalButton.Click += (_, _) =>
-        {
-            Data.MinimalMode = true;
-            window.Content = BuildMinimalFloatContent(window, game);
-        };
-
-        Button closeButton = new()
-        {
-            Content = "关闭",
-            MinHeight = 28,
-            Padding = new Thickness(12, 3, 12, 3),
-        };
-        closeButton.Click += (_, _) => DismissFloatWindow(game.Uuid);
-
-        StackPanel buttonRow = new()
-        {
-            Orientation = Orientation.Horizontal,
-            Spacing = 6,
-            HorizontalAlignment = HorizontalAlignment.Right,
-        };
-        buttonRow.Children.Add(pinButton);
-        buttonRow.Children.Add(minimalButton);
-        buttonRow.Children.Add(closeButton);
-
-        StackPanel root = new() { Padding = new Thickness(8), Spacing = 6 };
-        root.Children.Add(buttonRow);
-        root.Children.Add(BuildGuidePanel(game, false, true));
-        return root;
-    }
-
-    private FrameworkElement BuildMinimalFloatContent(Window window, Galgame game)
-    {
-        Button expandButton = new()
-        {
-            Content = "展开",
-            MinHeight = 24,
-            Padding = new Thickness(8, 2, 8, 2),
-            Opacity = 0.45, // 不影响观看
-            HorizontalAlignment = HorizontalAlignment.Right,
-            Margin = new Thickness(0, 0, 4, 0),
-        };
-        expandButton.Click += (_, _) =>
-        {
-            Data.MinimalMode = false;
-            window.Content = BuildNormalFloatContent(window, game);
-        };
-        StackPanel root = new() { Spacing = 4 };
-        root.Children.Add(expandButton);
-        root.Children.Add(BuildGuidePanel(game, false, false)); // 只有内容
-        return root;
     }
 
     private async Task OpenFloatingWindowDelayedAsync(Galgame game)
