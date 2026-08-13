@@ -1,16 +1,17 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Runtime.InteropServices;
-using System.Text.RegularExpressions;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using AngleSharp.Html.Parser;
 using GalgameManager.Enums;
 using GalgameManager.Models;
 using GalgameManager.WinApp.Base.Contracts.PluginUi;
-using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
@@ -18,7 +19,9 @@ using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Windowing;
 using PotatoVN.App.PluginBase.Controls.Prefabs;
 using PotatoVN.App.PluginBase.Models;
-using Windows.Graphics;
+using IElement = AngleSharp.Dom.IElement;
+using INode = AngleSharp.Dom.INode;
+using IText = AngleSharp.Dom.IText;
 
 namespace PotatoVN.App.PluginBase;
 
@@ -34,7 +37,24 @@ public partial class Plugin : IGalgamePageRightPanel
         "https://acgfan.top",
     ];
     private static readonly HttpClient Http = CreateHttpClient();
+    private static readonly ConcurrentDictionary<string, CachedPage> PageCache =
+        new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<Guid, Window> FloatingWindows = [];
+    private static readonly Dictionary<Guid, PanelState> FloatingPanels = [];
+    private static readonly Dictionary<Guid, CancellationTokenSource> FloatingWatchdogs = [];
+
+    private sealed record PanelSnapshot(
+        string StatusText,
+        Visibility StatusVisibility,
+        string? OpenSiteUrl,
+        UIElement[] Children);
+
+    private sealed record CachedPage(string Content, DateTimeOffset ExpiresAt);
+
+    private const int MaxCachedPages = 32;
+    private const int MaxCachedPageLength = 1024 * 1024;
+    private const int MaxResponseLength = 5 * 1024 * 1024;
+    private static readonly TimeSpan PageCacheDuration = TimeSpan.FromMinutes(10);
 
     private sealed class PanelState
     {
@@ -48,7 +68,9 @@ public partial class Plugin : IGalgamePageRightPanel
         public TextBlock? Status;
         public Button? OverlayBackButton;
         public Button? BarBackButton;
-        public Stack<(string StatusText, UIElement[] Children)> BackStack = [];
+        public CancellationTokenSource? RequestCancellation;
+        public Action? RefreshBarWidth;
+        public Stack<PanelSnapshot> BackStack = [];
     }
 
     public FrameworkElement CreateSettingUi()
@@ -82,29 +104,55 @@ public partial class Plugin : IGalgamePageRightPanel
         detectButton.Click += async (_, _) =>
         {
             detectButton.IsEnabled = false;
-            string? found = await ProbeAvailableDomainAsync();
-            detectButton.IsEnabled = true;
-            if (found is null)
+            try
             {
-                Plugin.HostApi.Info(Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning,
-                    "未检测到可用的 2DFan 域名，请检查网络");
-                return;
+                string? found = await ProbeAvailableDomainAsync();
+                if (found is null)
+                {
+                    Plugin.HostApi.Info(InfoBarSeverity.Warning,
+                        "未检测到可用的 2DFan 域名，请检查网络");
+                    return;
+                }
+                Data.Domain = found;
+                domainBox.SelectedItem = found;
+                Plugin.HostApi.Info(InfoBarSeverity.Success,
+                    $"已切换到可用域名：{found}");
             }
-            Data.Domain = found;
-            domainBox.SelectedItem = found;
-            Plugin.HostApi.Info(Microsoft.UI.Xaml.Controls.InfoBarSeverity.Success,
-                $"已切换到可用域名：{found}");
+            catch (Exception e)
+            {
+                Plugin.HostApi.Info(InfoBarSeverity.Warning, "域名检测失败", e.Message);
+            }
+            finally
+            {
+                detectButton.IsEnabled = true;
+            }
         };
         StackPanel domainStack = new() { Spacing = 6 };
         domainStack.Children.Add(domainBox);
         domainStack.Children.Add(detectButton);
 
         Button clearButton = new() { Content = "清除已保存的关联" };
-        clearButton.Click += (_, _) => Data.TopicUrlMap.Clear();
+        StdSetting? associationSetting = null;
+        clearButton.Click += (_, _) =>
+        {
+            Data.TopicUrlMap.Clear();
+            SaveData();
+            if (associationSetting is not null)
+                associationSetting.Description = "当前没有已关联的游戏";
+            clearButton.IsEnabled = false;
+        };
 
         StdStackPanel panel = new();
         ToggleSwitch autoOpenToggle = new() { IsOn = Data.AutoOpenFloatOnLaunch };
-        autoOpenToggle.Toggled += (_, _) => Data.AutoOpenFloatOnLaunch = autoOpenToggle.IsOn;
+        autoOpenToggle.Toggled += (_, _) =>
+        {
+            Data.AutoOpenFloatOnLaunch = autoOpenToggle.IsOn;
+            if (!autoOpenToggle.IsOn)
+            {
+                Data.ActiveGameUuid = null;
+                Data.ActiveGamePlayedAt = null;
+            }
+        };
         panel.Children.Add(new StdSetting("启动游戏时自动打开攻略浮窗", "启动游戏时自动弹出置顶攻略窗口，可拖动到游戏旁", autoOpenToggle));
         ToggleSwitch minimalToggle = new() { IsOn = Data.MinimalMode };
         minimalToggle.Toggled += (_, _) => Data.MinimalMode = minimalToggle.IsOn;
@@ -114,8 +162,12 @@ public partial class Plugin : IGalgamePageRightPanel
             "自动：游戏有月幕档案编号时用月幕，否则用 2DFan。可在游戏页内手动切换单个游戏的来源。", sourceBox));
         panel.Children.Add(new StdSetting("2DFan 域名",
             "官方域 2dfan.com 在中国大陆无法访问，域名失效时可点“自动检测”选择可用备用域", domainStack));
-        panel.Children.Add(new StdSetting("已保存的攻略关联",
-            $"共 {Data.TopicUrlMap.Count} 个游戏已关联攻略页，清除后需重新检索", clearButton));
+        associationSetting = new StdSetting("已保存的攻略关联",
+            Data.TopicUrlMap.Count == 0
+                ? "当前没有已关联的游戏"
+                : $"共 {Data.TopicUrlMap.Count} 个游戏已关联攻略页，清除后需重新检索", clearButton);
+        clearButton.IsEnabled = Data.TopicUrlMap.Count > 0;
+        panel.Children.Add(associationSetting);
         return panel;
     }
 
@@ -149,7 +201,7 @@ public partial class Plugin : IGalgamePageRightPanel
 
         Grid root = new()
         {
-            RowSpacing = 8,
+            RowSpacing = 2,
             MaxWidth = 380,
             VerticalAlignment = fillHeight ? VerticalAlignment.Stretch : VerticalAlignment.Top,
         };
@@ -180,34 +232,63 @@ public partial class Plugin : IGalgamePageRightPanel
 
     private async Task ShowSourceAsync(Galgame game, StackPanel content, TextBlock status, string? source, PanelState state)
     {
-        if (source is not null) state.CurrentSource = source;
+        CancellationToken token = BeginPanelRequest(state);
+        if (source is not null)
+        {
+            state.CurrentSource = source;
+            ResetNavigationState(state);
+        }
         UpdateSourceToggleState(state);
-        if (state.ProgressRing is not null) state.ProgressRing.IsActive = true;
+        status.Visibility = Visibility.Visible; // 加载/列表状态需显示 status 行
+        if (state.ProgressRing is not null)
+        {
+            state.ProgressRing.Visibility = Visibility.Visible;
+            state.ProgressRing.IsActive = true;
+            state.RefreshBarWidth?.Invoke();
+        }
         try
         {
             if (state.CurrentSource == "ymgal")
             {
                 try
                 {
-                    await YmgalAsync(game, content, status, state);
+                    await YmgalAsync(game, content, status, state, token);
+                }
+                catch (OperationCanceledException) when (token.IsCancellationRequested)
+                {
+                    return;
                 }
                 catch (Exception e)
                 {
+                    token.ThrowIfCancellationRequested();
                     // 月幕不可用时自动回退到 2DFan，避免玩家无攻略可用
                     state.CurrentSource = "2dfan";
                     UpdateSourceToggleState(state);
                     status.Text = $"月幕加载失败，已自动切换 2DFan：{e.Message}";
-                    await Df2anAsync(game, content, status, state);
+                    await Df2anAsync(game, content, status, state, token);
                 }
             }
             else
             {
-                await Df2anAsync(game, content, status, state);
+                await Df2anAsync(game, content, status, state, token);
             }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            // 新操作或窗口关闭已经取代本次加载。
+        }
+        catch (Exception e)
+        {
+            status.Text = $"加载失败：{e.Message}";
         }
         finally
         {
-            if (state.ProgressRing is not null) state.ProgressRing.IsActive = false;
+            if (IsCurrentPanelRequest(state, token) && state.ProgressRing is not null)
+            {
+                state.ProgressRing.IsActive = false;
+                state.ProgressRing.Visibility = Visibility.Collapsed;
+                state.RefreshBarWidth?.Invoke();
+            }
         }
     }
 
@@ -221,22 +302,61 @@ public partial class Plugin : IGalgamePageRightPanel
     {
         if (state.OverlayBackButton is not null) state.OverlayBackButton.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
         if (state.BarBackButton is not null) state.BarBackButton.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        state.RefreshBarWidth?.Invoke();
+    }
+
+    private static CancellationToken BeginPanelRequest(PanelState state)
+    {
+        state.RequestCancellation?.Cancel();
+        state.RequestCancellation?.Dispose();
+        state.RequestCancellation = new CancellationTokenSource();
+        return state.RequestCancellation.Token;
+    }
+
+    private static bool IsCurrentPanelRequest(PanelState state, CancellationToken token) =>
+        state.RequestCancellation is { } current && current.Token == token && !token.IsCancellationRequested;
+
+    private static void CancelPanelRequest(PanelState state)
+    {
+        state.RequestCancellation?.Cancel();
+        state.RequestCancellation?.Dispose();
+        state.RequestCancellation = null;
+    }
+
+    private static void ResetNavigationState(PanelState state)
+    {
+        state.BackStack.Clear();
+        SetOpenSite(state, null);
+        UpdateBackButtons(state, false);
     }
 
     private static void PushBack(PanelState state)
     {
         if (state.Content is null || state.Status is null) return;
-        state.BackStack.Push((state.Status.Text, state.Content.Children.ToArray()));
+        state.BackStack.Push(new PanelSnapshot(
+            state.Status.Text,
+            state.Status.Visibility,
+            state.OpenSiteUrl,
+            state.Content.Children.ToArray()));
         UpdateBackButtons(state, true);
     }
 
     private static void PopBack(PanelState state)
     {
         if (state.Content is null || state.Status is null || state.BackStack.Count == 0) return;
-        var (statusText, children) = state.BackStack.Pop();
+        CancelPanelRequest(state);
+        if (state.ProgressRing is not null)
+        {
+            state.ProgressRing.IsActive = false;
+            state.ProgressRing.Visibility = Visibility.Collapsed;
+            state.RefreshBarWidth?.Invoke();
+        }
+        PanelSnapshot snapshot = state.BackStack.Pop();
         state.Content.Children.Clear();
-        foreach (var child in children) state.Content.Children.Add(child);
-        state.Status.Text = statusText;
+        foreach (UIElement child in snapshot.Children) state.Content.Children.Add(child);
+        state.Status.Text = snapshot.StatusText;
+        state.Status.Visibility = snapshot.StatusVisibility;
+        SetOpenSite(state, snapshot.OpenSiteUrl);
         UpdateBackButtons(state, state.BackStack.Count > 0);
     }
 
@@ -250,11 +370,23 @@ public partial class Plugin : IGalgamePageRightPanel
         };
     }
 
-    private void OpenFloatingWindow(Galgame game)
+    private bool OpenFloatingWindow(Galgame game, bool notifyOnFailure = true)
     {
         try
         {
-            CloseFloatingWindow(game.Uuid);
+            if (FloatingWindows.TryGetValue(game.Uuid, out Window? existingWindow))
+            {
+                bool wasHidden = !existingWindow.AppWindow.IsVisible;
+                existingWindow.Activate();
+                if (wasHidden && FloatingPanels.TryGetValue(game.Uuid, out PanelState? existingPanel) &&
+                    existingPanel.Content is not null && existingPanel.Status is not null)
+                {
+                    _ = ShowSourceAsync(game, existingPanel.Content, existingPanel.Status,
+                        existingPanel.CurrentSource, existingPanel);
+                }
+                StartFloatWatchdog(game);
+                return true;
+            }
 
             Window window = new() { Title = $"攻略 - {game.Name.Value}" };
 
@@ -265,6 +397,33 @@ public partial class Plugin : IGalgamePageRightPanel
                 presenter.IsMaximizable = false;
                 presenter.IsMinimizable = false;
             }
+            // AppWindow 的尺寸单位是物理像素，XAML 布局使用逻辑像素。
+            // 缩放比例必须在 Content 加载后从 XamlRoot 读取，不能在这里提前固定为 1。
+            double measuredBarWidth = 420;
+            double GetScale()
+            {
+                double xamlScale =
+                    (window.Content as FrameworkElement)?.XamlRoot?.RasterizationScale ?? 0;
+                if (xamlScale > 0) return xamlScale;
+
+                // Content 尚未 Loaded 时使用 HWND 的当前显示器 DPI，避免首次显示先窄后宽。
+                IntPtr hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
+                uint dpi = GetDpiForWindow(hwnd);
+                return dpi > 0 ? dpi / 96.0 : 1.0;
+            }
+
+            int ToPhysicalPixels(double logicalPixels) =>
+                Math.Max(1, (int)Math.Ceiling(logicalPixels * GetScale()));
+
+            void ApplyMinSize(bool minimal)
+            {
+                if (presenter is not null)
+                    presenter.PreferredMinimumWidth = minimal
+                        ? 0
+                        : ToPhysicalPixels(measuredBarWidth);
+            }
+
+            ApplyMinSize(Data.MinimalMode);
 
             FrameworkElement panel = BuildGuidePanel(game, true, out PanelState state);
             PanelState panelState = state;
@@ -320,7 +479,12 @@ public partial class Plugin : IGalgamePageRightPanel
             // 重新检索（↻，与返回/网站同行，位于返回与网站中间）
             Button refreshButton = new() { Content = "↻", FontSize = 12, MinHeight = 24, Padding = new Thickness(8, 2, 8, 2) };
             ToolTipService.SetToolTip(refreshButton, "重新检索");
-            refreshButton.Click += (_, _) => _ = ShowSourceAsync(game, panelState.Content!, panelState.Status!, panelState.CurrentSource, panelState);
+            refreshButton.Click += (_, _) =>
+            {
+                ClearPageCache(panelState.CurrentSource);
+                _ = ShowSourceAsync(game, panelState.Content!, panelState.Status!, panelState.CurrentSource,
+                    panelState);
+            };
 
             // 浏览器打开站点（符号化，替代内容区文字按钮）
             Button siteButton = new()
@@ -332,10 +496,19 @@ public partial class Plugin : IGalgamePageRightPanel
                 Visibility = Visibility.Collapsed,
             };
             ToolTipService.SetToolTip(siteButton, "在浏览器打开站点页面");
-            siteButton.Click += (_, _) =>
+            siteButton.Click += async (_, _) =>
             {
-                if (panelState.OpenSiteUrl is { } siteUrl)
-                    _ = Windows.System.Launcher.LaunchUriAsync(new Uri(siteUrl));
+                if (panelState.OpenSiteUrl is not { } siteUrl) return;
+                try
+                {
+                    bool launched = await Windows.System.Launcher.LaunchUriAsync(new Uri(siteUrl));
+                    if (!launched)
+                        Plugin.HostApi.Info(InfoBarSeverity.Warning, "无法打开浏览器", siteUrl);
+                }
+                catch (Exception e)
+                {
+                    Plugin.HostApi.Info(InfoBarSeverity.Warning, "无法打开浏览器", e.Message);
+                }
             };
             panelState.SiteButton = siteButton;
 
@@ -344,7 +517,14 @@ public partial class Plugin : IGalgamePageRightPanel
             ToolTipService.SetToolTip(closeButton, "关闭");
 
             // 加载进度圈（原在 header，随来源按钮同移入 bar）
-            ProgressRing progressRing = new() { Width = 16, Height = 16, IsActive = false, VerticalAlignment = VerticalAlignment.Center };
+            ProgressRing progressRing = new()
+            {
+                Width = 16,
+                Height = 16,
+                IsActive = false,
+                Visibility = Visibility.Collapsed,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
             panelState.ProgressRing = progressRing;
 
             StackPanel bar = new()
@@ -373,16 +553,45 @@ public partial class Plugin : IGalgamePageRightPanel
                 Visibility = Visibility.Collapsed,
             };
 
+            void ApplyCurrentTitleBar(bool minimal)
+            {
+                double clientWidth = (window.Content as FrameworkElement)?.ActualWidth ??
+                    window.AppWindow.Size.Width / GetScale();
+                double dragWidth;
+                if (minimal)
+                {
+                    dragWidth = Math.Max(0, clientWidth - 72);
+                }
+                else
+                {
+                    try
+                    {
+                        UIElement? root = window.Content as UIElement;
+                        dragWidth = root is null
+                            ? Math.Max(0, clientWidth - measuredBarWidth)
+                            : Math.Max(0, bar.TransformToVisual(root)
+                                .TransformPoint(new Windows.Foundation.Point()).X);
+                    }
+                    catch (Exception)
+                    {
+                        dragWidth = Math.Max(0, clientWidth - measuredBarWidth);
+                    }
+                }
+                ApplyTitleBar(window, dragWidth, GetScale());
+            }
+
             void ApplyMode()
             {
                 bool minimal = Data.MinimalMode;
                 bar.Visibility = minimal ? Visibility.Collapsed : Visibility.Visible;
                 overlay.Visibility = Visibility.Collapsed; // 叠加层仅极简+hover 显示
                 UpdateBackButtons(panelState, panelState.BackStack.Count > 0);
-                window.AppWindow.Resize(minimal
-                    ? new Windows.Graphics.SizeInt32(300, 380)   // 小窗模式
-                    : new Windows.Graphics.SizeInt32(480, 700)); // 完整模式
-                ApplyTitleBar(window, minimal);
+                ApplyMinSize(minimal); // 模式切换时同步更新最小宽度，避免 Resize 被旧下限拦截
+                double logicalWidth = minimal ? 300 : Math.Max(480, measuredBarWidth);
+                double logicalHeight = minimal ? 380 : 700;
+                window.AppWindow.Resize(new Windows.Graphics.SizeInt32(
+                    ToPhysicalPixels(logicalWidth), ToPhysicalPixels(logicalHeight)));
+                ApplyCurrentTitleBar(minimal);
             }
 
             void UpdatePinState()
@@ -435,9 +644,70 @@ public partial class Plugin : IGalgamePageRightPanel
 
             window.Content = shell;
 
-            window.AppWindow.Resize(new Windows.Graphics.SizeInt32(480, 700));
+            // 按钮会随导航状态动态显隐，因此不能只在首次 Loaded 时测量一次。
+            // 每次布局后汇总所有可见按钮的固有宽度；只有结果变化时才更新窗口，避免布局循环。
+            void RefreshBarWidth()
+            {
+                if (bar.Visibility != Visibility.Visible) return;
+
+                FrameworkElement[] visibleChildren = bar.Children
+                    .OfType<FrameworkElement>()
+                    .Where(child => child.Visibility == Visibility.Visible)
+                    .ToArray();
+                if (visibleChildren.Length == 0) return;
+
+                double childrenWidth = visibleChildren.Sum(child =>
+                    Math.Max(child.ActualWidth, child.DesiredSize.Width));
+                double spacingWidth = Math.Max(0, visibleChildren.Length - 1) * bar.Spacing;
+                double outerLogicalWidth = window.AppWindow.Size.Width / GetScale();
+                double nonClientWidth = Math.Max(0, outerLogicalWidth - shell.ActualWidth);
+                // StackPanel 靠右排列；窗口最窄时，剩余空间正好等于 shell 左内边距，
+                // 从而与右内边距形成等宽缝隙。PreferredMinimumWidth 限制的是包含
+                // resize border 的外部宽度，因此还需补上实测的非客户区宽度。
+                double requiredWidth = Math.Ceiling(childrenWidth + spacingWidth + shell.Padding.Left +
+                    shell.Padding.Right + nonClientWidth);
+                if (requiredWidth <= 0 || Math.Abs(requiredWidth - measuredBarWidth) < 0.5) return;
+
+                measuredBarWidth = requiredWidth;
+                ApplyMinSize(minimal: false);
+
+                int requiredPhysicalWidth = ToPhysicalPixels(measuredBarWidth);
+                if (!Data.MinimalMode && window.AppWindow.Size.Width < requiredPhysicalWidth)
+                {
+                    window.AppWindow.Resize(new Windows.Graphics.SizeInt32(
+                        requiredPhysicalWidth, window.AppWindow.Size.Height));
+                }
+                ApplyCurrentTitleBar(minimal: false);
+            }
+
+            bool refreshQueued = false;
+            void QueueBarWidthRefresh()
+            {
+                if (refreshQueued) return;
+                refreshQueued = true;
+                window.DispatcherQueue.TryEnqueue(() =>
+                {
+                    refreshQueued = false;
+                    RefreshBarWidth();
+                });
+            }
+
+            panelState.RefreshBarWidth = QueueBarWidthRefresh;
+            bar.SizeChanged += (_, _) => QueueBarWidthRefresh();
+            shell.SizeChanged += (_, _) => ApplyCurrentTitleBar(Data.MinimalMode);
+            shell.Loaded += (_, _) =>
+            {
+                // Loaded 时才能取得正确 DPI；再等一次布局循环获得按钮实际宽度。
+                window.DispatcherQueue.TryEnqueue(() =>
+                {
+                    RefreshBarWidth();
+                    ApplyMode();
+                });
+            };
+
             FloatingWindows[game.Uuid] = window;
-            window.Closed += (_, _) => FloatingWindows.Remove(game.Uuid);
+            FloatingPanels[game.Uuid] = panelState;
+            window.Closed += (_, _) => RemoveFloatingWindow(game.Uuid);
             try
             {
                 string iconPath = System.IO.Path.Combine(Plugin.HostApi.GetPluginPath(), "Assets", "plugin-icon.ico");
@@ -449,20 +719,84 @@ public partial class Plugin : IGalgamePageRightPanel
             }
             window.Activate();
             if (Data.PinFloatOnTop) _ = BumpTopmostAfterMagpieAsync(window);
-            _ = FloatWatchdogAsync(game);
+            StartFloatWatchdog(game);
             ApplyMode(); // 初始按数据应用
+            return true;
         }
-        catch (Exception)
+        catch (Exception e)
         {
-            Plugin.HostApi.Info(Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning, "攻略浮窗暂不可用（宿主限制）", null, 3000);
+            if (notifyOnFailure)
+            {
+                Plugin.HostApi.Info(Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning,
+                    "攻略浮窗暂不可用", e.Message, 3000);
+            }
+            return false;
         }
     }
 
-    private async Task OpenFloatingWindowDelayedAsync(Galgame game)
+    private async Task<bool> OpenFloatingWindowOnMainThreadAsync(Galgame game, bool notifyOnFailure,
+        CancellationToken token)
+    {
+        var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            HostApi.InvokeOnMainThread(() =>
+            {
+                if (token.IsCancellationRequested)
+                {
+                    completion.TrySetCanceled(token);
+                    return;
+                }
+                try
+                {
+                    completion.TrySetResult(OpenFloatingWindow(game, notifyOnFailure));
+                }
+                catch (Exception e)
+                {
+                    completion.TrySetException(e);
+                }
+            });
+        }
+        catch (Exception e)
+        {
+            completion.TrySetException(e);
+        }
+        return await completion.Task.WaitAsync(token);
+    }
+
+    private async Task<bool> OpenFloatingWindowWithRetryAsync(Galgame game, CancellationToken token)
+    {
+        const int maxAttempts = 5;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            token.ThrowIfCancellationRequested();
+            if (Data.ActiveGameUuid != game.Uuid) return false;
+            try
+            {
+                if (await OpenFloatingWindowOnMainThreadAsync(game, notifyOnFailure: false, token)) return true;
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception)
+            {
+                // 宿主 UI 尚未完全就绪时短暂等待并重试。
+            }
+
+            if (attempt < maxAttempts) await Task.Delay(500, token);
+        }
+
+        Plugin.HostApi.Info(Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning,
+            "攻略浮窗自动打开失败", "可在游戏详情页中手动打开", 5000);
+        return false;
+    }
+
+    private async Task OpenFloatingWindowDelayedAsync(Galgame game, CancellationToken token)
     {
         try
         {
-            await Task.Delay(2200); // 等宿主 SetWindowMode 执行完（SystemTray 模式下旧进程此时已退出，窗口不会在旧进程出现）
+            await Task.Delay(2200, token); // 等宿主 SetWindowMode 执行完（SystemTray 模式下旧进程此时已退出，窗口不会在旧进程出现）
             if (Data.ActiveGameUuid != game.Uuid)
             {
                 // 2.2s 内切了游戏/停止：放弃弹窗（诊断用，非错误）
@@ -470,7 +804,11 @@ public partial class Plugin : IGalgamePageRightPanel
                     $"自动弹窗已放弃：2.2s 内 ActiveGameUuid 已变更（期望 {game.Uuid}）", null, 3000);
                 return;
             }
-            HostApi.InvokeOnMainThread(() => OpenFloatingWindow(game));
+            await OpenFloatingWindowWithRetryAsync(game, token);
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception e)
         {
@@ -481,23 +819,53 @@ public partial class Plugin : IGalgamePageRightPanel
 
     private static void CloseFloatingWindow(Guid uuid) => DismissFloatWindow(uuid);
 
+    private static void CloseAllFloatingWindows()
+    {
+        Window[] windows = FloatingWindows.Values.ToArray();
+        foreach (PanelState state in FloatingPanels.Values) CancelPanelRequest(state);
+        foreach (CancellationTokenSource cts in FloatingWatchdogs.Values)
+        {
+            cts.Cancel();
+            cts.Dispose();
+        }
+        FloatingWindows.Clear();
+        FloatingPanels.Clear();
+        FloatingWatchdogs.Clear();
+        PageCache.Clear();
+        foreach (Window window in windows)
+        {
+            window.Close();
+        }
+    }
+
     private static void DismissFloatWindow(Guid uuid)
     {
-        if (FloatingWindows.Remove(uuid, out Window? window))
+        if (FloatingPanels.TryGetValue(uuid, out PanelState? state)) CancelPanelRequest(state);
+        StopFloatWatchdog(uuid);
+        if (FloatingWindows.TryGetValue(uuid, out Window? window))
             window.AppWindow.Hide();
     }
 
-    private static void ApplyTitleBar(Window window, bool minimal)
+    private static void RemoveFloatingWindow(Guid uuid)
+    {
+        if (FloatingPanels.Remove(uuid, out PanelState? state)) CancelPanelRequest(state);
+        StopFloatWatchdog(uuid);
+        FloatingWindows.Remove(uuid);
+    }
+
+    private static void ApplyTitleBar(Window window, double dragWidthLogical, double scale)
     {
         try
         {
             var titleBar = window.AppWindow.TitleBar;
             titleBar.ExtendsContentIntoTitleBar = true;
             try { titleBar.PreferredHeightOption = TitleBarHeightOption.Collapsed; } catch { } // Win10 忽略
-            // 拖拽区：顶部 28px，排除右侧按钮区（极简排除 64px，完整排除 240px）
-            int width = window.AppWindow.Size.Width;
-            int rightExclude = minimal ? 64 : 240;
-            titleBar.SetDragRectangles([new Windows.Graphics.RectInt32(0, 0, Math.Max(0, width - rightExclude), 28)]);
+            // dragWidthLogical 直接来自按钮行的实际左边界，完整覆盖空白且不压住按钮。
+            int dragWidth = Math.Max(0, (int)Math.Floor(dragWidthLogical * scale));
+            int dragHeight = Math.Max(1, (int)Math.Ceiling(28 * scale));
+            titleBar.SetDragRectangles(dragWidth > 0
+                ? [new Windows.Graphics.RectInt32(0, 0, dragWidth, dragHeight)]
+                : []);
         }
         catch (Exception)
         {
@@ -505,54 +873,99 @@ public partial class Plugin : IGalgamePageRightPanel
         }
     }
 
-    private async Task FloatWatchdogAsync(Galgame game)
+    private void StartFloatWatchdog(Galgame game)
+    {
+        StopFloatWatchdog(game.Uuid);
+        var cts = new CancellationTokenSource();
+        FloatingWatchdogs[game.Uuid] = cts;
+        _ = FloatWatchdogAsync(game, cts.Token);
+    }
+
+    private static void StopFloatWatchdog(Guid uuid)
+    {
+        if (!FloatingWatchdogs.Remove(uuid, out CancellationTokenSource? cts)) return;
+        cts.Cancel();
+        cts.Dispose();
+    }
+
+    private async Task FloatWatchdogAsync(Galgame game, CancellationToken token)
     {
         bool wasRunning = false;
         var startTime = DateTime.UtcNow;
-        while (true)
+        try
         {
-            await Task.Delay(2000);
-            if (!FloatingWindows.ContainsKey(game.Uuid)) return;
-            // 手动打开（非活跃游戏）的窗口不由看门狗关闭
-            if (Data.ActiveGameUuid != game.Uuid) return;
-            bool running = await IsGameProcessRunningAsync(game);
-            // 曾运行 → 现在消失 = 真退出，兜底关窗
-            if (!running && wasRunning)
+            while (true)
             {
-                DismissFloatWindow(game.Uuid);
-                return;
+                // 宿主停止消息是主要关闭路径；这里每 5 秒低频兜底。
+                await Task.Delay(5000, token);
+                if (!FloatingWindows.TryGetValue(game.Uuid, out Window? window) ||
+                    !window.AppWindow.IsVisible) return;
+                // 手动打开（非活跃游戏）的窗口不由看门狗关闭
+                if (Data.ActiveGameUuid != game.Uuid) return;
+                bool running = await IsGameProcessRunningAsync(game, token);
+                // 曾运行 → 现在消失 = 真退出，兜底关窗
+                if (!running && wasRunning)
+                {
+                    DismissFloatWindow(game.Uuid);
+                    return;
+                }
+                // 从未匹配到进程且已超 60s：视为退出兜底关窗（覆盖 LE/包装器路径不匹配场景）
+                if (!running && !wasRunning && DateTime.UtcNow - startTime > TimeSpan.FromSeconds(60))
+                {
+                    DismissFloatWindow(game.Uuid);
+                    return;
+                }
+                wasRunning = running;
             }
-            // 从未匹配到进程且已超 60s：视为退出兜底关窗（覆盖 LE/包装器路径不匹配场景），避免永久残留
-            if (!running && !wasRunning && DateTime.UtcNow - startTime > TimeSpan.FromSeconds(60))
-            {
-                DismissFloatWindow(game.Uuid);
-                return;
-            }
-            wasRunning = running; // 慢启动游戏首查 false 时不关窗，等进程出现
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            // 窗口隐藏或关闭。
+        }
+        catch (Exception)
+        {
+            // 宿主停止消息仍会负责关闭窗口；看门狗异常不应影响插件进程。
         }
     }
 
-    private static Task<bool> IsGameProcessRunningAsync(Galgame game)
+    private static Task<bool> IsGameProcessRunningAsync(Galgame game, CancellationToken token)
     {
         string? installPath = game.LocalPath;
         if (string.IsNullOrEmpty(installPath)) return Task.FromResult(true); // 无法判断 → 假定运行中，交给宿主消息
         return Task.Run(() =>
         {
+            string processName = System.IO.Path.GetFileNameWithoutExtension(game.ProcessName ?? string.Empty);
+            if (!string.IsNullOrWhiteSpace(processName))
+            {
+                foreach (System.Diagnostics.Process namedProcess in
+                         System.Diagnostics.Process.GetProcessesByName(processName))
+                {
+                    using (namedProcess)
+                    {
+                        if (!namedProcess.HasExited) return true;
+                    }
+                }
+            }
+
             foreach (System.Diagnostics.Process process in System.Diagnostics.Process.GetProcesses())
             {
-                try
+                using (process)
                 {
-                    string? file = TryGetProcessPath(process.Id);
-                    if (file is not null && file.StartsWith(installPath, StringComparison.OrdinalIgnoreCase))
-                        return true;
-                }
-                catch
-                {
-                    // 单个进程查询失败不影响整体
+                    token.ThrowIfCancellationRequested();
+                    try
+                    {
+                        string? file = TryGetProcessPath(process.Id);
+                        if (file is not null && file.StartsWith(installPath, StringComparison.OrdinalIgnoreCase))
+                            return true;
+                    }
+                    catch
+                    {
+                        // 单个进程查询失败不影响整体
+                    }
                 }
             }
             return false;
-        });
+        }, token);
     }
 
     private static string? TryGetProcessPath(int processId)
@@ -591,6 +1004,9 @@ public partial class Plugin : IGalgamePageRightPanel
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
 
+    [DllImport("user32.dll")]
+    private static extern uint GetDpiForWindow(IntPtr hWnd);
+
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern IntPtr OpenProcess(uint desiredAccess, bool inheritHandle, int processId);
 
@@ -608,7 +1024,8 @@ public partial class Plugin : IGalgamePageRightPanel
 
     #region 2DFan
 
-    private async Task Df2anAsync(Galgame game, StackPanel content, TextBlock status, PanelState state)
+    private async Task Df2anAsync(Galgame game, StackPanel content, TextBlock status, PanelState state,
+        CancellationToken token)
     {
         status.Text = "加载中…";
         content.Children.Clear();
@@ -617,14 +1034,22 @@ public partial class Plugin : IGalgamePageRightPanel
             if (Data.TopicUrlMap.TryGetValue(game.Uuid, out string? cachedUrl) && !string.IsNullOrEmpty(cachedUrl))
             {
                 string url = RewriteDomain(cachedUrl);
-                if (url != cachedUrl) Data.TopicUrlMap[game.Uuid] = url;
+                if (url != cachedUrl)
+                {
+                    Data.TopicUrlMap[game.Uuid] = url;
+                    SaveData();
+                }
                 // 缓存直达：先压入"重新检索"返回层，返回后仍可更换攻略
                 ShowCachedPlaceholder(game, content, status, state);
                 PushBack(state);
-                await ShowTopicAsync(url, content, status, state);
+                await ShowTopicAsync(url, content, status, state, token);
                 return;
             }
-            await SearchAndShowAsync(game, content, status, state);
+            await SearchAndShowAsync(game, content, status, state, token);
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            // 新操作已经取代本次加载。
         }
         catch (Exception e)
         {
@@ -635,23 +1060,29 @@ public partial class Plugin : IGalgamePageRightPanel
     private void ShowCachedPlaceholder(Galgame game, StackPanel content, TextBlock status, PanelState state)
     {
         status.Text = "已关联攻略页（缓存直达），可重新检索更换：";
+        status.Visibility = Visibility.Visible;
         content.Children.Clear();
         AddResultRow(content, 0, "重新检索攻略", () =>
         {
             Data.TopicUrlMap.Remove(game.Uuid);
             SaveData();
-            _ = SearchAndShowAsync(game, content, status, state);
+            CancellationToken token = BeginPanelRequest(state);
+            _ = SearchAndShowAsync(game, content, status, state, token);
+            return Task.CompletedTask;
         });
     }
 
-    private async Task SearchAndShowAsync(Galgame game, StackPanel content, TextBlock status, PanelState state)
+    private async Task SearchAndShowAsync(Galgame game, StackPanel content, TextBlock status, PanelState state,
+        CancellationToken token)
     {
         string query = BuildQuery(game);
+        SetOpenSite(state, null);
         status.Text = $"正在 2DFan 检索：{query}";
         content.Children.Clear();
         try
         {
-            List<(string Title, string Url)> subjects = await SearchSubjectsAsync(query);
+            List<(string Title, string Url)> subjects = await SearchSubjectsAsync(query, token);
+            token.ThrowIfCancellationRequested();
             if (subjects.Count == 0)
             {
                 ShowEmpty(content, status, "没有找到结果。",
@@ -664,12 +1095,14 @@ public partial class Plugin : IGalgamePageRightPanel
                 (string title, string url) = subjects[i];
                 AddResultRow(content, i + 1, title, async () =>
                 {
+                    CancellationToken itemToken = BeginPanelRequest(state);
                     PushBack(state);
                     content.Children.Clear();
                     status.Text = $"正在获取「{title}」的攻略…";
                     try
                     {
-                        List<(string Title, string Url)> topics = await GetTopicsAsync(url);
+                        List<(string Title, string Url)> topics = await GetTopicsAsync(url, itemToken);
+                        itemToken.ThrowIfCancellationRequested();
                         if (topics.Count == 0)
                         {
                             ShowEmpty(content, status, "该条目暂无攻略。", url, state);
@@ -681,12 +1114,17 @@ public partial class Plugin : IGalgamePageRightPanel
                             (string topicTitle, string topicUrl) = topics[j];
                             AddResultRow(content, j + 1, topicTitle, async () =>
                             {
+                                CancellationToken topicToken = BeginPanelRequest(state);
                                 PushBack(state);
                                 Data.TopicUrlMap[game.Uuid] = topicUrl;
                                 SaveData();
-                                await ShowTopicAsync(topicUrl, content, status, state);
+                                await ShowTopicAsync(topicUrl, content, status, state, topicToken);
                             });
                         }
+                    }
+                    catch (OperationCanceledException) when (itemToken.IsCancellationRequested)
+                    {
+                        // 新操作已经取代本次加载。
                     }
                     catch (Exception e)
                     {
@@ -695,25 +1133,32 @@ public partial class Plugin : IGalgamePageRightPanel
                 });
             }
         }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            // 新操作已经取代本次检索。
+        }
         catch (Exception e)
         {
             status.Text = $"检索失败：{e.Message}";
         }
     }
 
-    private static async Task ShowTopicAsync(string url, StackPanel content, TextBlock status, PanelState state)
+    private async Task ShowTopicAsync(string url, StackPanel content, TextBlock status, PanelState state,
+        CancellationToken token)
     {
+        SetOpenSite(state, null);
         content.Children.Clear();
         status.Text = "正在加载攻略…";
         try
         {
-            string html = await GetAsync(url);
+            string html = await Get2DfanAsync(url, token);
             string text = await Task.Run(() =>
             {
                 var doc = new HtmlParser().ParseDocument(html);
                 var element = doc.QuerySelector("div.topic-content");
-                return element is null ? string.Empty : HtmlToText(element.InnerHtml);
-            });
+                return element is null ? string.Empty : HtmlToText(element);
+            }, token);
+            token.ThrowIfCancellationRequested();
             if (string.IsNullOrWhiteSpace(text))
             {
                 ShowEmpty(content, status, "攻略内容为空。", url, state);
@@ -721,16 +1166,20 @@ public partial class Plugin : IGalgamePageRightPanel
             }
             ShowText(text, content, status, url, state);
         }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            // 新操作已经取代本次加载。
+        }
         catch (Exception e)
         {
             status.Text = $"加载失败：{e.Message}";
-            SetOpenSite(state, content, url);
+            SetOpenSite(state, url);
         }
     }
 
-    private async Task<List<(string Title, string Url)>> SearchSubjectsAsync(string query)
+    private async Task<List<(string Title, string Url)>> SearchSubjectsAsync(string query, CancellationToken token)
     {
-        string html = await GetAsync($"{Data.Domain}/subjects/search?keyword={Uri.EscapeDataString(query)}");
+        string html = await Get2DfanAsync($"/subjects/search?keyword={Uri.EscapeDataString(query)}", token);
         return await Task.Run(() =>
         {
             var doc = new HtmlParser().ParseDocument(html);
@@ -739,19 +1188,19 @@ public partial class Plugin : IGalgamePageRightPanel
             foreach (var anchor in doc.QuerySelectorAll("a[href]"))
             {
                 string href = anchor.GetAttribute("href") ?? string.Empty;
-                if (!Regex.IsMatch(href, @"^/subjects/\d+$")) continue;
+                if (!IsNumericPath(href, "/subjects/")) continue;
                 string anchorTitle = anchor.TextContent.Trim();
                 if (anchorTitle.Length < 2) continue;
                 string full = $"{Data.Domain}{href}";
                 if (seen.Add(full)) list.Add((anchorTitle, full));
             }
             return list;
-        });
+        }, token);
     }
 
-    private async Task<List<(string Title, string Url)>> GetTopicsAsync(string subjectUrl)
+    private async Task<List<(string Title, string Url)>> GetTopicsAsync(string subjectUrl, CancellationToken token)
     {
-        string html = await GetAsync(subjectUrl);
+        string html = await Get2DfanAsync(subjectUrl, token);
         return await Task.Run(() =>
         {
             var doc = new HtmlParser().ParseDocument(html);
@@ -760,22 +1209,24 @@ public partial class Plugin : IGalgamePageRightPanel
             foreach (var anchor in doc.QuerySelectorAll("a[href]"))
             {
                 string href = anchor.GetAttribute("href") ?? string.Empty;
-                if (!Regex.IsMatch(href, @"^/topics/\d+$")) continue;
+                if (!IsNumericPath(href, "/topics/")) continue;
                 string anchorTitle = anchor.TextContent.Trim();
                 if (anchorTitle.Length < 2 || anchorTitle == "查看完整介绍") continue;
                 string full = $"{Data.Domain}{href}";
                 if (seen.Add(full)) list.Add((anchorTitle, full));
             }
             return list;
-        });
+        }, token);
     }
 
     #endregion
 
     #region 月幕 ymgal
 
-    private async Task YmgalAsync(Galgame game, StackPanel content, TextBlock status, PanelState state)
+    private async Task YmgalAsync(Galgame game, StackPanel content, TextBlock status, PanelState state,
+        CancellationToken token)
     {
+        SetOpenSite(state, null);
         content.Children.Clear();
         string? gidStr = game.Ids[(int)RssType.Ymgal];
         if (string.IsNullOrEmpty(gidStr) || !int.TryParse(gidStr, out int gid))
@@ -785,7 +1236,8 @@ public partial class Plugin : IGalgamePageRightPanel
             return;
         }
         status.Text = "正在加载月幕文章列表…";
-        List<(string Title, string Url)> articles = await GetYmgalArticlesAsync(gid);
+        List<(string Title, string Url)> articles = await GetYmgalArticlesAsync(gid, token);
+        token.ThrowIfCancellationRequested();
         if (articles.Count == 0)
         {
             ShowEmpty(content, status, "月幕没有找到该游戏的文章/攻略。", $"{YmgalBase}/ga{gid}", state);
@@ -797,10 +1249,26 @@ public partial class Plugin : IGalgamePageRightPanel
             (string title, string url) = articles[i];
             AddResultRow(content, i + 1, title, async () =>
             {
+                CancellationToken articleToken = BeginPanelRequest(state);
                 PushBack(state);
                 content.Children.Clear();
                 status.Text = $"正在加载「{title}」…";
-                string text = await GetYmgalArticleTextAsync(url);
+                string text;
+                try
+                {
+                    text = await GetYmgalArticleTextAsync(url, articleToken);
+                    articleToken.ThrowIfCancellationRequested();
+                }
+                catch (OperationCanceledException) when (articleToken.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception e)
+                {
+                    status.Text = $"加载失败：{e.Message}";
+                    SetOpenSite(state, url);
+                    return;
+                }
                 if (string.IsNullOrWhiteSpace(text))
                 {
                     ShowEmpty(content, status, "文章内容为空。", url, state);
@@ -811,9 +1279,9 @@ public partial class Plugin : IGalgamePageRightPanel
         }
     }
 
-    private async Task<List<(string Title, string Url)>> GetYmgalArticlesAsync(int gid)
+    private async Task<List<(string Title, string Url)>> GetYmgalArticlesAsync(int gid, CancellationToken token)
     {
-        string html = await GetAsync($"{YmgalBase}/ga{gid}");
+        string html = await GetAsync($"{YmgalBase}/ga{gid}", token);
         return await Task.Run(() =>
         {
             var doc = new HtmlParser().ParseDocument(html);
@@ -824,25 +1292,25 @@ public partial class Plugin : IGalgamePageRightPanel
                 var link = item.QuerySelector("a.article-title");
                 if (link is null) continue;
                 string href = link.GetAttribute("href") ?? string.Empty;
-                if (!Regex.IsMatch(href, @"^/co/article/\d+$")) continue;
+                if (!IsNumericPath(href, "/co/article/")) continue;
                 string title = link.TextContent.Trim();
                 if (title.Length < 2) continue;
                 string full = $"{YmgalBase}{href}";
                 if (seen.Add(full)) list.Add((title, full));
             }
             return list;
-        });
+        }, token);
     }
 
-    private static async Task<string> GetYmgalArticleTextAsync(string url)
+    private static async Task<string> GetYmgalArticleTextAsync(string url, CancellationToken token)
     {
-        string html = await GetAsync(url);
+        string html = await GetAsync(url, token);
         return await Task.Run(() =>
         {
             var doc = new HtmlParser().ParseDocument(html);
             var element = doc.QuerySelector("div.article-content");
-            return element is null ? string.Empty : HtmlToText(element.InnerHtml);
-        });
+            return element is null ? string.Empty : HtmlToText(element);
+        }, token);
     }
 
     #endregion
@@ -852,7 +1320,8 @@ public partial class Plugin : IGalgamePageRightPanel
     private static void ShowText(string text, StackPanel content, TextBlock status, string url, PanelState state)
     {
         status.Text = string.Empty;
-        SetOpenSite(state, content, url);
+        status.Visibility = Visibility.Collapsed; // 正文显示时收起状态行，消除空白
+        SetOpenSite(state, url);
         TextBlock body = new()
         {
             Text = text,
@@ -867,18 +1336,22 @@ public partial class Plugin : IGalgamePageRightPanel
     private static void ShowEmpty(StackPanel content, TextBlock status, string text, string? url, PanelState state)
     {
         status.Text = text;
+        status.Visibility = Visibility.Visible;
         content.Children.Clear();
-        if (url is not null) SetOpenSite(state, content, url);
+        SetOpenSite(state, url);
     }
 
     // 站点打开按钮：仅浮窗 bar 上"⇱"
-    private static void SetOpenSite(PanelState state, StackPanel content, string url)
+    private static void SetOpenSite(PanelState state, string? url)
     {
         state.OpenSiteUrl = url;
-        if (state.SiteButton is not null) state.SiteButton.Visibility = Visibility.Visible;
+        if (state.SiteButton is not null)
+            state.SiteButton.Visibility = url is null ? Visibility.Collapsed : Visibility.Visible;
+        state.RefreshBarWidth?.Invoke();
     }
 
-    private static Button AddResultRow(StackPanel content, int index, string text, Action onClick, string? tag = null)
+    private static Button AddResultRow(StackPanel content, int index, string text, Func<Task> onClick,
+        string? tag = null)
     {
         Button button = new()
         {
@@ -895,7 +1368,26 @@ public partial class Plugin : IGalgamePageRightPanel
                 FontSize = 13,
             },
         };
-        button.Click += (_, _) => onClick();
+        button.Click += async (_, _) =>
+        {
+            button.IsEnabled = false;
+            try
+            {
+                await onClick();
+            }
+            catch (OperationCanceledException)
+            {
+                // 新操作已取代当前操作。
+            }
+            catch (Exception e)
+            {
+                Plugin.HostApi.Info(InfoBarSeverity.Warning, "攻略操作失败", e.Message);
+            }
+            finally
+            {
+                button.IsEnabled = true;
+            }
+        };
         content.Children.Add(button);
         return button;
     }
@@ -908,31 +1400,192 @@ public partial class Plugin : IGalgamePageRightPanel
         return new SolidColorBrush(Windows.UI.Color.FromArgb(255, 128, 128, 128));
     }
 
-    private static string HtmlToText(string html)
+    private static string HtmlToText(IElement element)
     {
-        string withBreaks = html
-            .Replace("<br>", "\n")
-            .Replace("<br/>", "\n")
-            .Replace("<br />", "\n")
-            .Replace("</p>", "\n")
-            .Replace("</div>", "\n")
-            .Replace("</li>", "\n")
-            .Replace("</h1>", "\n")
-            .Replace("</h2>", "\n")
-            .Replace("</h3>", "\n")
-            .Replace("</tr>", "\n");
-        string text = Regex.Replace(withBreaks, "<[^>]+>", " ");
-        text = System.Net.WebUtility.HtmlDecode(text);
-        return string.Join("\n", text.Split('\n')
-            .Select(line => Regex.Replace(line, @"[ \t]+", " ").Trim())
+        var builder = new StringBuilder();
+        AppendNode(element, builder);
+        return string.Join("\n", builder.ToString().Split('\n')
+            .Select(NormalizeInlineWhitespace)
             .Where(line => line.Length > 0));
+
+        static void AppendNode(INode node, StringBuilder output)
+        {
+            if (node is IText text)
+            {
+                output.Append(text.Data);
+                return;
+            }
+
+            if (node is not IElement current) return;
+            string tag = current.LocalName;
+            if (tag is "script" or "style" or "noscript") return;
+            if (tag == "br")
+            {
+                output.AppendLine();
+                return;
+            }
+
+            bool block = tag is "p" or "div" or "li" or "ul" or "ol" or "section" or "article" or
+                "header" or "footer" or "blockquote" or "pre" or "table" or "tr" or "h1" or "h2" or
+                "h3" or "h4" or "h5" or "h6";
+            if (block && output.Length > 0 && output[^1] != '\n') output.AppendLine();
+            foreach (INode child in current.ChildNodes) AppendNode(child, output);
+            if (block && output.Length > 0 && output[^1] != '\n') output.AppendLine();
+        }
+
+        static string NormalizeInlineWhitespace(string line)
+        {
+            ReadOnlySpan<char> input = line.AsSpan().Trim();
+            if (input.IsEmpty) return string.Empty;
+            var output = new StringBuilder(input.Length);
+            bool pendingSpace = false;
+            foreach (char character in input)
+            {
+                if (character is ' ' or '\t' or '\r')
+                {
+                    pendingSpace = output.Length > 0;
+                    continue;
+                }
+                if (pendingSpace) output.Append(' ');
+                output.Append(character);
+                pendingSpace = false;
+            }
+            return output.ToString();
+        }
     }
 
-    private static async Task<string> GetAsync(string url)
+    private static async Task<string> GetAsync(string url, CancellationToken token)
     {
-        using var response = await Http.GetAsync(url);
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        if (PageCache.TryGetValue(url, out CachedPage? cached))
+        {
+            if (cached.ExpiresAt > now) return cached.Content;
+            PageCache.TryRemove(url, out _);
+        }
+
+        using var response = await Http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, token);
         response.EnsureSuccessStatusCode();
-        return await response.Content.ReadAsStringAsync();
+        if (response.Content.Headers.ContentLength is > MaxResponseLength)
+            throw new HttpRequestException("响应内容过大");
+        string content = await ReadContentAsync(response.Content, token);
+        if (content.Length <= MaxCachedPageLength)
+        {
+            PageCache[url] = new CachedPage(content, now + PageCacheDuration);
+            TrimPageCache();
+        }
+        return content;
+    }
+
+    private static async Task<string> ReadContentAsync(HttpContent content, CancellationToken token)
+    {
+        await using Stream source = await content.ReadAsStreamAsync(token);
+        using var buffer = new MemoryStream();
+        var chunk = new byte[81920];
+        while (true)
+        {
+            int read = await source.ReadAsync(chunk, token);
+            if (read == 0) break;
+            if (buffer.Length + read > MaxResponseLength)
+                throw new HttpRequestException("响应内容过大");
+            await buffer.WriteAsync(chunk.AsMemory(0, read), token);
+        }
+
+        Encoding encoding = Encoding.UTF8;
+        string? charset = content.Headers.ContentType?.CharSet?.Trim('"');
+        if (!string.IsNullOrWhiteSpace(charset))
+        {
+            try
+            {
+                encoding = Encoding.GetEncoding(charset);
+            }
+            catch (ArgumentException)
+            {
+                // 无效或不受支持的编码声明，按 UTF-8 读取。
+            }
+            catch (NotSupportedException)
+            {
+                // 当前运行时未注册对应代码页，按 UTF-8 读取。
+            }
+        }
+        return encoding.GetString(buffer.GetBuffer(), 0, checked((int)buffer.Length));
+    }
+
+    private static void TrimPageCache()
+    {
+        int removeCount = PageCache.Count - MaxCachedPages;
+        if (removeCount <= 0) return;
+        foreach (string key in PageCache
+                     .OrderBy(pair => pair.Value.ExpiresAt)
+                     .Take(removeCount)
+                     .Select(pair => pair.Key))
+            PageCache.TryRemove(key, out _);
+    }
+
+    private void ClearPageCache(string source)
+    {
+        IEnumerable<string> prefixes = source == "ymgal"
+            ? [YmgalBase]
+            : Known2DfanDomains.Append(Data.Domain);
+        string[] normalizedPrefixes = prefixes
+            .Select(prefix => prefix.TrimEnd('/'))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        foreach (string key in PageCache.Keys)
+        {
+            if (normalizedPrefixes.Any(prefix => key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))
+                PageCache.TryRemove(key, out _);
+        }
+    }
+
+    private async Task<string> Get2DfanAsync(string urlOrPath, CancellationToken token)
+    {
+        string path = GetPathAndQuery(urlOrPath);
+        string initialDomain = Data.Domain.TrimEnd('/');
+        try
+        {
+            return await GetAsync($"{initialDomain}{path}", token);
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (HttpRequestException firstError) when (ShouldTryAlternateDomain(firstError))
+        {
+            string? availableDomain = await ProbeAvailableDomainAsync(token, initialDomain);
+            if (availableDomain is null) throw;
+
+            Data.Domain = availableDomain;
+            return await GetAsync($"{availableDomain}{path}", token);
+        }
+        catch (TaskCanceledException) when (!token.IsCancellationRequested)
+        {
+            string? availableDomain = await ProbeAvailableDomainAsync(token, initialDomain);
+            if (availableDomain is null) throw;
+
+            Data.Domain = availableDomain;
+            return await GetAsync($"{availableDomain}{path}", token);
+        }
+    }
+
+    private static bool ShouldTryAlternateDomain(HttpRequestException error) =>
+        error.StatusCode is null or System.Net.HttpStatusCode.Forbidden or
+            System.Net.HttpStatusCode.RequestTimeout or System.Net.HttpStatusCode.TooManyRequests ||
+        (int)error.StatusCode.Value >= 500;
+
+    private static string GetPathAndQuery(string urlOrPath)
+    {
+        if (Uri.TryCreate(urlOrPath, UriKind.Absolute, out Uri? uri)) return uri.PathAndQuery;
+        return urlOrPath.StartsWith('/') ? urlOrPath : $"/{urlOrPath}";
+    }
+
+    private static bool IsNumericPath(string value, string prefix)
+    {
+        if (!value.StartsWith(prefix, StringComparison.Ordinal) || value.Length == prefix.Length) return false;
+        for (int i = prefix.Length; i < value.Length; i++)
+        {
+            if (!char.IsAsciiDigit(value[i])) return false;
+        }
+        return true;
     }
 
     private static string BuildQuery(Galgame game)
@@ -951,23 +1604,47 @@ public partial class Plugin : IGalgamePageRightPanel
         return url;
     }
 
-    private static async Task<string?> ProbeAvailableDomainAsync()
+    private static async Task<string?> ProbeAvailableDomainAsync(CancellationToken token = default,
+        string? excludedDomain = null)
     {
-        foreach (string domain in Known2DfanDomains)
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+        timeoutCts.CancelAfter(TimeSpan.FromSeconds(8));
+        List<Task<string?>> probes = Known2DfanDomains
+            .Where(domain => !string.Equals(domain, excludedDomain, StringComparison.OrdinalIgnoreCase))
+            .Select(domain => ProbeDomainAsync(domain, timeoutCts.Token))
+            .ToList();
+
+        while (probes.Count > 0)
         {
-            try
+            Task<string?> completed = await Task.WhenAny(probes);
+            probes.Remove(completed);
+            string? domain = await completed;
+            if (domain is not null)
             {
-                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
-                using var response = await Http.GetAsync($"{domain}/subjects",
-                    HttpCompletionOption.ResponseHeadersRead, cts.Token);
-                if (response.IsSuccessStatusCode) return domain;
-            }
-            catch
-            {
-                // 尝试下一个域名
+                await timeoutCts.CancelAsync();
+                return domain;
             }
         }
+        token.ThrowIfCancellationRequested();
         return null;
+    }
+
+    private static async Task<string?> ProbeDomainAsync(string domain, CancellationToken token)
+    {
+        try
+        {
+            using var response = await Http.GetAsync($"{domain}/subjects",
+                HttpCompletionOption.ResponseHeadersRead, token);
+            return response.IsSuccessStatusCode ? domain : null;
+        }
+        catch (OperationCanceledException)
+        {
+            return null;
+        }
+        catch (HttpRequestException)
+        {
+            return null;
+        }
     }
 
     private static HttpClient CreateHttpClient()

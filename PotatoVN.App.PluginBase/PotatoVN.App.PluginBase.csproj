@@ -138,16 +138,10 @@ StampedFiles = stampedFiles.ToArray();
     </ProjectReference>
   </ItemGroup>
   <ItemGroup>
-    <None Update="Strings\en-US.json">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Update="Strings\ja-JP.json">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Update="Strings\zh-CN.json">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Update="Assets\plugin-icon.ico">
+    <Content Remove="Assets\plugin-icon.ico" />
+    <Content Remove="Assets\plugin-icon.svg" />
+    <Content Remove="Assets\plugin-icon-256.png" />
+    <None Include="Assets\plugin-icon.ico">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>
@@ -182,6 +176,10 @@ StampedFiles = stampedFiles.ToArray();
 
 		<!-- 共享程序集黑名单：在临时目录中删除这些 DLL -->
 		<ItemGroup>
+			<!-- 发布包不需要调试符号；本地 Release 输出仍保留 PDB 便于诊断。 -->
+			<_PluginBlacklistFiles Include="$(_PluginTempDir)*.pdb" />
+			<!-- 本插件没有 XAML 页面或自定义资源字典，不需要空 PRI。 -->
+			<_PluginBlacklistFiles Include="$(_PluginTempDir)*.pri" />
 			<_PluginBlacklistFiles Include="$(_PluginTempDir)0Harmony.dll" />
 			<_PluginBlacklistFiles Include="$(_PluginTempDir)Microsoft.WinUI.dll" />
 			<_PluginBlacklistFiles Include="$(_PluginTempDir)Microsoft.WindowsAppRuntime.Bootstrap.Net.dll" />
@@ -229,6 +227,9 @@ StampedFiles = stampedFiles.ToArray();
 
 		<Delete Files="@(_PluginBlacklistFiles)" />
         <RemoveDir Directories="$(_PluginTempDir)runtimes" />
+        <RemoveDir Directories="$(_PluginTempDir)Strings" />
+        <!-- 本插件 UI 完全由 C# 构建，不需要 SDK 生成的程序集资源目录。 -->
+        <RemoveDir Directories="$(_PluginTempDir)$(AssemblyName)" />
 
 		<!-- 确保打包输出目录存在 -->
 		<MakeDir Directories="$(PluginPackageOutputDir)" />

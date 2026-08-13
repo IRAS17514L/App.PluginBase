@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -12,7 +13,6 @@ using GalgameManager.WinApp.Base.Models.Msgs;
 using GalgameManager.Models;
 using Microsoft.Windows.AppLifecycle;
 using Windows.ApplicationModel.Activation;
-using PotatoVN.App.PluginBase.Helper;
 using PotatoVN.App.PluginBase.Models;
 
 namespace PotatoVN.App.PluginBase
@@ -21,21 +21,23 @@ namespace PotatoVN.App.PluginBase
     {
         public static IPotatoVnApi HostApi { get; private set; } = null!;
         private IPotatoVnApi _hostApi = null!;
+        private readonly SemaphoreSlim _saveGate = new(1, 1);
+        private readonly object _saveScheduleLock = new();
+        private readonly CancellationTokenSource _lifetimeCts = new();
+        private CancellationTokenSource? _scheduledSaveCts;
         internal WalkthroughData Data { get; private set; } = new();
-        internal static WalkthroughData? CurrentData;
 
         public PluginInfo Info { get; } = new()
         {
             Id = new Guid("c9a68427-b773-4a98-bb66-2c6f4a4ebe37"),
             Name = "攻略面板",
-            Description = "在游戏详情页显示攻略，支持 2DFan 与月幕（中文）双来源，自动检索并支持手动关联直达。",
+            Description = "提供攻略检索与独立浮窗阅读，支持 2DFan 与月幕（中文）双来源、自动检索和手动关联直达。",
         };
 
         public async Task InitializeAsync(IPotatoVnApi hostApi)
         {
             _hostApi = hostApi;
             HostApi = hostApi;
-            XamlResourceLocatorFactory.PackagePath = _hostApi.GetPluginPath();
             var dataJson = await _hostApi.GetDataAsync();
             if (!string.IsNullOrWhiteSpace(dataJson))
             {
@@ -43,16 +45,18 @@ namespace PotatoVN.App.PluginBase
                 {
                     Data = System.Text.Json.JsonSerializer.Deserialize<WalkthroughData>(dataJson) ?? new WalkthroughData();
                 }
-                catch
+                catch (Exception e)
                 {
                     Data = new WalkthroughData();
+                    _hostApi.DeveloperEvent(msg: "攻略面板配置损坏，已恢复默认值", e: e);
                 }
             }
-            CurrentData = Data;
-            Data.PropertyChanged += (_, _) => SaveData();
+            bool dataNormalized = NormalizeData();
+            Data.PropertyChanged += OnDataPropertyChanged;
+            if (dataNormalized) ScheduleSave();
             _hostApi.Messenger.Register<GalgamePlayedMessage>(this, OnGamePlayed);
             _hostApi.Messenger.Register<GalgameStoppedMessage>(this, OnGameStopped);
-            TryRestoreFloatWindowAfterRestart();
+            _ = TryRestoreFloatWindowAfterRestartAsync(_lifetimeCts.Token);
         }
 
         private void OnGamePlayed(object recipient, GalgamePlayedMessage message)
@@ -60,22 +64,31 @@ namespace PotatoVN.App.PluginBase
             if (!Data.AutoOpenFloatOnLaunch) return;
             Data.ActiveGameUuid = message.Value.Uuid;
             Data.ActiveGamePlayedAt = DateTime.Now;
-            _ = SaveAndOpenDelayedAsync(message.Value);
+            _ = SaveAndOpenDelayedAsync(message.Value, _lifetimeCts.Token);
         }
 
-        private async Task SaveAndOpenDelayedAsync(Galgame game)
+        private async Task SaveAndOpenDelayedAsync(Galgame game, CancellationToken token)
         {
             try
             {
                 // 宿主 SystemTray 游玩模式约 1s 后 Restart("/r") 杀旧进程；必须等数据落盘，
                 // 否则新进程 TryRestore 读不到 ActiveGameUuid，浮窗无法恢复
-                await _hostApi.SaveDataAsync(System.Text.Json.JsonSerializer.Serialize(Data));
+                // 等待一次经过串行化的完整快照落盘，确保宿主 /r 重启后能读到两个活动字段。
+                await SaveDataNowAsync();
             }
-            catch (Exception)
+            catch (Exception e)
             {
                 // 保存失败不阻塞后续弹窗尝试
+                _hostApi.DeveloperEvent(msg: "保存攻略浮窗启动状态失败", e: e);
             }
-            await OpenFloatingWindowDelayedAsync(game);
+            try
+            {
+                await OpenFloatingWindowDelayedAsync(game, token);
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                // 插件正在卸载。
+            }
         }
 
         private void OnGameStopped(object recipient, GalgameStoppedMessage message)
@@ -85,7 +98,7 @@ namespace PotatoVN.App.PluginBase
             HostApi.InvokeOnMainThread(() => CloseFloatingWindow(message.Value.Uuid));
         }
 
-        private async void TryRestoreFloatWindowAfterRestart()
+        private async Task TryRestoreFloatWindowAfterRestartAsync(CancellationToken token)
         {
             try
             {
@@ -99,21 +112,32 @@ namespace PotatoVN.App.PluginBase
                     return;
                 }
                 // 超 15 分钟视为过期
-                if (DateTime.Now - playedAt > TimeSpan.FromMinutes(15)) return;
-                // 宿主游戏库可能尚未加载完，轮询等待（最多 ~3s）
+                if (DateTime.Now - playedAt > TimeSpan.FromMinutes(15))
+                {
+                    Data.ActiveGameUuid = null;
+                    Data.ActiveGamePlayedAt = null;
+                    return;
+                }
+                // 插件初始化通常发生在游戏库加载之后，但较慢设备上仍可能出现短暂空库。
+                // 给宿主最多 30 秒完成恢复，避免原先 3 秒窗口造成偶发漏开。
                 Galgame? game = null;
-                for (int i = 0; i < 10 && game is null; i++)
+                for (int i = 0; i < 60 && game is null; i++)
                 {
                     game = _hostApi.GetAllGames().FirstOrDefault(g => g.Uuid == uuid);
-                    if (game is null) await Task.Delay(300);
+                    if (game is null) await Task.Delay(500, token);
                 }
                 if (game is null) return;
-                await Task.Delay(600); // 等宿主界面稳定（新进程 UI 就绪即可，窗口独立于宿主页面）
-                HostApi.InvokeOnMainThread(() => OpenFloatingWindow(game));
+                await Task.Delay(600, token); // 等宿主界面稳定（新进程 UI 就绪即可，窗口独立于宿主页面）
+                await OpenFloatingWindowWithRetryAsync(game, token);
             }
-            catch (Exception)
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                // 插件正在卸载。
+            }
+            catch (Exception e)
             {
                 // 浮窗恢复失败不阻塞插件启动
+                _hostApi.DeveloperEvent(msg: "恢复攻略浮窗失败", e: e);
             }
         }
 
@@ -137,15 +161,142 @@ namespace PotatoVN.App.PluginBase
             return Environment.GetCommandLineArgs().Any(a => a == "/r");
         }
 
-        public Task OnUninstallAsync(bool deleteData, Action<TimeSpan> extendWaitHandler, CancellationToken cts)
+        public async Task OnUninstallAsync(bool deleteData, Action<TimeSpan> extendWaitHandler, CancellationToken cts)
         {
-            if (cts.IsCancellationRequested) return Task.FromCanceled(cts);
+            cts.ThrowIfCancellationRequested();
+            await _lifetimeCts.CancelAsync();
             _hostApi.Messenger.Unregister<GalgamePlayedMessage>(this);
             _hostApi.Messenger.Unregister<GalgameStoppedMessage>(this);
-            return Task.CompletedTask;
+            Data.PropertyChanged -= OnDataPropertyChanged;
+            CancelScheduledSave();
+            if (!deleteData)
+            {
+                await PersistDataAsync();
+            }
+
+            var windowsClosed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            using CancellationTokenRegistration registration = cts.Register(() => windowsClosed.TrySetCanceled(cts));
+            try
+            {
+                _hostApi.InvokeOnMainThread(() =>
+                {
+                    try
+                    {
+                        CloseAllFloatingWindows();
+                        windowsClosed.TrySetResult();
+                    }
+                    catch (Exception e)
+                    {
+                        windowsClosed.TrySetException(e);
+                    }
+                });
+            }
+            catch (Exception e)
+            {
+                windowsClosed.TrySetException(e);
+            }
+            await windowsClosed.Task;
         }
 
-        internal void SaveData() => _ = _hostApi.SaveDataAsync(System.Text.Json.JsonSerializer.Serialize(Data));
+        private async Task PersistDataAsync()
+        {
+            await _saveGate.WaitAsync();
+            try
+            {
+                // 获取锁之后再序列化：即使此前排队了多个 PropertyChanged 保存，
+                // 每次写入也都是当前完整状态，不会让旧快照最后完成并覆盖新快照。
+                string json = System.Text.Json.JsonSerializer.Serialize(Data);
+                await _hostApi.SaveDataAsync(json);
+            }
+            finally
+            {
+                _saveGate.Release();
+            }
+        }
+
+        private async Task SaveDataNowAsync()
+        {
+            CancelScheduledSave();
+            await PersistDataAsync();
+        }
+
+        private void OnDataPropertyChanged(object? sender, PropertyChangedEventArgs e) => ScheduleSave();
+
+        private bool NormalizeData()
+        {
+            bool changed = false;
+            if (Data.TopicUrlMap is null)
+            {
+                Data.TopicUrlMap = [];
+                changed = true;
+            }
+            if (Data.DefaultSource is not ("auto" or "2dfan" or "ymgal"))
+            {
+                Data.DefaultSource = "auto";
+                changed = true;
+            }
+            if (!Uri.TryCreate(Data.Domain, UriKind.Absolute, out Uri? domain) ||
+                domain.Scheme is not ("http" or "https"))
+            {
+                Data.Domain = "https://2dfan.com";
+                changed = true;
+            }
+            if (Data.Version != 1)
+            {
+                Data.Version = 1;
+                changed = true;
+            }
+            return changed;
+        }
+
+        private void ScheduleSave()
+        {
+            CancellationTokenSource cts;
+            lock (_saveScheduleLock)
+            {
+                _scheduledSaveCts?.Cancel();
+                _scheduledSaveCts = cts = new CancellationTokenSource();
+            }
+            _ = SaveAfterDelayAsync(cts);
+        }
+
+        private async Task SaveAfterDelayAsync(CancellationTokenSource cts)
+        {
+            try
+            {
+                await Task.Delay(250, cts.Token);
+                await PersistDataAsync();
+            }
+            catch (OperationCanceledException) when (cts.IsCancellationRequested)
+            {
+                // 后续变更会保存更新后的完整快照。
+            }
+            catch (Exception e)
+            {
+                // 普通设置变更采用后台保存；关键的游戏启动状态会显式等待。
+                _hostApi.DeveloperEvent(msg: "保存攻略面板设置失败", e: e);
+            }
+            finally
+            {
+                lock (_saveScheduleLock)
+                {
+                    if (ReferenceEquals(_scheduledSaveCts, cts))
+                        _scheduledSaveCts = null;
+                }
+                cts.Dispose();
+            }
+        }
+
+        private void CancelScheduledSave()
+        {
+            lock (_saveScheduleLock)
+            {
+                _scheduledSaveCts?.Cancel();
+                _scheduledSaveCts = null;
+            }
+        }
+
+        internal void SaveData() => ScheduleSave();
     }
 }
 
