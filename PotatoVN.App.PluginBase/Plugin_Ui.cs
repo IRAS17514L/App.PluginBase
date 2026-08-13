@@ -291,6 +291,15 @@ public partial class Plugin : IGalgamePageRightPanel
 
             FloatingWindows[game.Uuid] = window;
             window.Closed += (_, _) => FloatingWindows.Remove(game.Uuid);
+            try
+            {
+                string iconPath = System.IO.Path.Combine(Plugin.HostApi.GetPluginPath(), "Assets", "plugin-icon.ico");
+                if (System.IO.File.Exists(iconPath)) window.AppWindow.SetIcon(iconPath);
+            }
+            catch (Exception)
+            {
+                // 图标缺失或设置失败不影响窗口
+            }
             window.Activate();
             if (Data.PinFloatOnTop) _ = BumpTopmostAfterMagpieAsync(window);
             _ = FloatWatchdogAsync(game);
