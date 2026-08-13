@@ -484,15 +484,21 @@ public partial class Plugin : IGalgamePageRightPanel
 
     private async Task FloatWatchdogAsync(Galgame game)
     {
+        bool wasRunning = false;
         while (true)
         {
             await Task.Delay(2000);
             if (!FloatingWindows.ContainsKey(game.Uuid)) return;
             // 手动打开（非活跃游戏）的窗口不由看门狗关闭
             if (Data.ActiveGameUuid != game.Uuid) return;
-            if (await IsGameProcessRunningAsync(game)) continue;
-            DismissFloatWindow(game.Uuid);
-            return;
+            bool running = await IsGameProcessRunningAsync(game);
+            if (!running && wasRunning)
+            {
+                // 曾运行 → 现在消失 = 游戏真退出，兜底关窗（宿主停止消息丢失场景）
+                DismissFloatWindow(game.Uuid);
+                return;
+            }
+            wasRunning = running; // 慢启动游戏首查 false 时不关窗，等进程出现
         }
     }
 
