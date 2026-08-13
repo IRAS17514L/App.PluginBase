@@ -22,6 +22,7 @@ namespace PotatoVN.App.PluginBase
         public static IPotatoVnApi HostApi { get; private set; } = null!;
         private IPotatoVnApi _hostApi = null!;
         internal WalkthroughData Data { get; private set; } = new();
+        internal static WalkthroughData? CurrentData;
 
         public PluginInfo Info { get; } = new()
         {
@@ -47,6 +48,7 @@ namespace PotatoVN.App.PluginBase
                     Data = new WalkthroughData();
                 }
             }
+            CurrentData = Data;
             Data.PropertyChanged += (_, _) => SaveData();
             _hostApi.Messenger.Register<GalgamePlayedMessage>(this, OnGamePlayed);
             _hostApi.Messenger.Register<GalgameStoppedMessage>(this, OnGameStopped);

@@ -794,7 +794,7 @@ public partial class Plugin : IGalgamePageRightPanel
         if (url is not null) AddOpenSiteButton(content, url);
     }
 
-    private static void AddResultRow(StackPanel content, int index, string text, Action onClick, string? tag = null)
+    private static Button AddResultRow(StackPanel content, int index, string text, Action onClick, string? tag = null)
     {
         Button button = new()
         {
@@ -813,10 +813,14 @@ public partial class Plugin : IGalgamePageRightPanel
         };
         button.Click += (_, _) => onClick();
         content.Children.Add(button);
+        return button;
     }
 
     private static void AddOpenSiteButton(StackPanel content, string url)
-        => AddResultRow(content, 0, "在浏览器打开站点页面", () => _ = Windows.System.Launcher.LaunchUriAsync(new Uri(url)), "openSite");
+    {
+        Button button = AddResultRow(content, 0, "在浏览器打开站点页面", () => _ = Windows.System.Launcher.LaunchUriAsync(new Uri(url)), "openSite");
+        button.Visibility = Plugin.CurrentData is { MinimalMode: true } ? Visibility.Collapsed : Visibility.Visible;
+    }
 
     private static Brush GetSecondaryBrush()
     {
