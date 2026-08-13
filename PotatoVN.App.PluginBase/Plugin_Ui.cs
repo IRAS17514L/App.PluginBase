@@ -277,7 +277,14 @@ public partial class Plugin : IGalgamePageRightPanel
             content.Children.Add(buttonRow);
             content.Children.Add(BuildGuidePanel(game, false));
 
-            window.SystemBackdrop = new MicaBackdrop();
+            try
+            {
+                window.SystemBackdrop = new MicaBackdrop();
+            }
+            catch (Exception)
+            {
+                // Mica 不受支持（如 Win10）时忽略，保持默认背景
+            }
             window.Content = content;
 
             window.AppWindow.Resize(new Windows.Graphics.SizeInt32(480, 700));
@@ -316,12 +323,14 @@ public partial class Plugin : IGalgamePageRightPanel
             window.AppWindow.Hide();
     }
 
-    private static async Task FloatWatchdogAsync(Galgame game)
+    private async Task FloatWatchdogAsync(Galgame game)
     {
         while (true)
         {
             await Task.Delay(5000);
             if (!FloatingWindows.ContainsKey(game.Uuid)) return;
+            // 手动打开（非活跃游戏）的窗口不由看门狗关闭
+            if (Data.ActiveGameUuid != game.Uuid) return;
             if (IsGameProcessRunning(game)) continue;
             DismissFloatWindow(game.Uuid);
             return;
