@@ -45,6 +45,7 @@ public partial class Plugin : IGalgamePageRightPanel
         public StackPanel? Content;
         public TextBlock? Status;
         public Button? BackButton;
+        public Button? OverlayBackButton;
         public Stack<(string StatusText, UIElement[] Children)> BackStack = [];
     }
 
@@ -238,21 +239,27 @@ public partial class Plugin : IGalgamePageRightPanel
         if (state.SourceYmgal is not null) state.SourceYmgal.IsChecked = state.CurrentSource == "ymgal";
     }
 
+    private static void UpdateBackButtons(PanelState state, bool visible)
+    {
+        if (state.BackButton is not null) state.BackButton.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        if (state.OverlayBackButton is not null) state.OverlayBackButton.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+    }
+
     private static void PushBack(PanelState state)
     {
         if (state.Content is null || state.Status is null) return;
         state.BackStack.Push((state.Status.Text, state.Content.Children.ToArray()));
-        if (state.BackButton is not null) state.BackButton.Visibility = Visibility.Visible;
+        UpdateBackButtons(state, true);
     }
 
     private static void PopBack(PanelState state)
     {
-        if (state.Content is null || state.Status is null || state.BackButton is null || state.BackStack.Count == 0) return;
+        if (state.Content is null || state.Status is null || state.BackStack.Count == 0) return;
         var (statusText, children) = state.BackStack.Pop();
         state.Content.Children.Clear();
         foreach (var child in children) state.Content.Children.Add(child);
         state.Status.Text = statusText;
-        state.BackButton.Visibility = state.BackStack.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        UpdateBackButtons(state, state.BackStack.Count > 0);
     }
 
     private void OpenFloatingWindow(Galgame game)
@@ -285,15 +292,6 @@ public partial class Plugin : IGalgamePageRightPanel
             backButton.Click += (_, _) => PopBack(panelState);
             panelState.BackButton = backButton;
 
-            // 极简/展开切换按钮（低透明度，不影响观看）
-            Button expandButton = new()
-            {
-                Content = "展开",
-                MinHeight = 24,
-                Padding = new Thickness(8, 2, 8, 2),
-                Opacity = 0.45,
-            };
-
             // 极简按钮（完整模式回极简）
             Button minimalButton = new() { Content = "极简", MinHeight = 24, Padding = new Thickness(8, 2, 8, 2) };
 
@@ -316,19 +314,26 @@ public partial class Plugin : IGalgamePageRightPanel
                 HorizontalAlignment = HorizontalAlignment.Right,
             };
             bar.Children.Add(backButton);
-            bar.Children.Add(expandButton);
             bar.Children.Add(minimalButton);
             bar.Children.Add(pinButton);
             bar.Children.Add(closeButton);
 
+            // 叠加层：仅极简模式，悬浮内容右上（hover 显隐）
+            StackPanel overlay = new()
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 6,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                VerticalAlignment = VerticalAlignment.Top,
+                Visibility = Visibility.Collapsed,
+            };
+
             void ApplyMode()
             {
                 bool minimal = Data.MinimalMode;
-                backButton.Visibility = panelState.BackStack.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
-                expandButton.Visibility = minimal ? Visibility.Visible : Visibility.Collapsed;
-                minimalButton.Visibility = minimal ? Visibility.Collapsed : Visibility.Visible;
-                pinButton.Visibility = minimal ? Visibility.Collapsed : Visibility.Visible;
-                closeButton.Visibility = minimal ? Visibility.Collapsed : Visibility.Visible;
+                bar.Visibility = minimal ? Visibility.Collapsed : Visibility.Visible;
+                overlay.Visibility = Visibility.Collapsed; // 叠加层仅极简+hover 显示
+                UpdateBackButtons(panelState, panelState.BackStack.Count > 0);
                 if (header is not null) header.Visibility = minimal ? Visibility.Collapsed : Visibility.Visible;
                 if (panelState.Content is not null)
                     foreach (var child in panelState.Content.Children)
@@ -347,7 +352,6 @@ public partial class Plugin : IGalgamePageRightPanel
                 Data.PinFloatOnTop = pinButton.IsChecked == true;
             }
 
-            expandButton.Click += (_, _) => { Data.MinimalMode = false; ApplyMode(); };
             minimalButton.Click += (_, _) => { Data.MinimalMode = true; ApplyMode(); };
             pinButton.Checked += (_, _) => UpdatePinState();
             pinButton.Unchecked += (_, _) => UpdatePinState();
@@ -356,13 +360,30 @@ public partial class Plugin : IGalgamePageRightPanel
             Grid shell = new() { Padding = new Thickness(4) };
             shell.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             shell.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-            shell.Children.Add(bar);
-            Grid.SetRow(bar, 0);
-            shell.Children.Add(panel);
-            Grid.SetRow(panel, 1);
+
+            // 内容叠加区：panel 铺底 + overlay 悬浮右上
+            Grid contentGrid = new();
+            contentGrid.Children.Add(panel);
             panel.MaxWidth = double.PositiveInfinity; // 填满窗口宽，消除侧边空白
             panel.HorizontalAlignment = HorizontalAlignment.Stretch;
             panel.VerticalAlignment = VerticalAlignment.Stretch;
+
+            Button overlayBackButton = new() { Content = "←", MinHeight = 24, Padding = new Thickness(8, 2, 8, 2) };
+            overlayBackButton.Click += (_, _) => PopBack(state);
+            Button expandButton = new() { Content = "展开", MinHeight = 24, Padding = new Thickness(8, 2, 8, 2), Opacity = 0.6 };
+            expandButton.Click += (_, _) => { Data.MinimalMode = false; ApplyMode(); };
+            overlay.Children.Add(overlayBackButton);
+            overlay.Children.Add(expandButton);
+            contentGrid.Children.Add(overlay);
+            state.OverlayBackButton = overlayBackButton;
+
+            shell.Children.Add(bar);         // Row0：完整模式按钮行
+            Grid.SetRow(bar, 0);
+            shell.Children.Add(contentGrid); // Row1
+            Grid.SetRow(contentGrid, 1);
+
+            shell.PointerEntered += (_, _) => { if (Data.MinimalMode) overlay.Visibility = Visibility.Visible; };
+            shell.PointerExited += (_, _) => { if (Data.MinimalMode) overlay.Visibility = Visibility.Collapsed; };
 
             try
             {
