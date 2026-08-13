@@ -262,6 +262,16 @@ public partial class Plugin : IGalgamePageRightPanel
         UpdateBackButtons(state, state.BackStack.Count > 0);
     }
 
+    private static FontIcon CreateGlyphIcon(string glyph)
+    {
+        return new FontIcon
+        {
+            Glyph = glyph,
+            FontFamily = new FontFamily("Segoe Fluent Icons,Segoe MDL2 Assets"),
+            FontSize = 12,
+        };
+    }
+
     private void OpenFloatingWindow(Galgame game)
     {
         try
@@ -284,16 +294,18 @@ public partial class Plugin : IGalgamePageRightPanel
             // 返回按钮（返回上一层，选错攻略可回退）
             Button backButton = new()
             {
-                Content = "←",
+                Content = CreateGlyphIcon("\uE72B"),
                 MinHeight = 24,
                 Padding = new Thickness(8, 2, 8, 2),
                 Visibility = Visibility.Collapsed,
             };
+            ToolTipService.SetToolTip(backButton, "返回");
             backButton.Click += (_, _) => PopBack(panelState);
             panelState.BackButton = backButton;
 
             // 极简按钮（完整模式回极简）
-            Button minimalButton = new() { Content = "极简", MinHeight = 24, Padding = new Thickness(8, 2, 8, 2) };
+            Button minimalButton = new() { Content = CreateGlyphIcon("\uE8A3"), MinHeight = 24, Padding = new Thickness(8, 2, 8, 2) };
+            ToolTipService.SetToolTip(minimalButton, "极简");
 
             // 钉子置顶
             FontIcon pinIcon = new()
@@ -368,9 +380,11 @@ public partial class Plugin : IGalgamePageRightPanel
             panel.HorizontalAlignment = HorizontalAlignment.Stretch;
             panel.VerticalAlignment = VerticalAlignment.Stretch;
 
-            Button overlayBackButton = new() { Content = "←", MinHeight = 24, Padding = new Thickness(8, 2, 8, 2) };
+            Button overlayBackButton = new() { Content = CreateGlyphIcon("\uE72B"), MinHeight = 24, Padding = new Thickness(8, 2, 8, 2) };
+            ToolTipService.SetToolTip(overlayBackButton, "返回");
             overlayBackButton.Click += (_, _) => PopBack(state);
-            Button expandButton = new() { Content = "展开", MinHeight = 24, Padding = new Thickness(8, 2, 8, 2), Opacity = 0.6 };
+            Button expandButton = new() { Content = CreateGlyphIcon("\uE9D9"), MinHeight = 24, Padding = new Thickness(8, 2, 8, 2), Opacity = 0.6 };
+            ToolTipService.SetToolTip(expandButton, "展开");
             expandButton.Click += (_, _) => { Data.MinimalMode = false; ApplyMode(); };
             overlay.Children.Add(overlayBackButton);
             overlay.Children.Add(expandButton);
