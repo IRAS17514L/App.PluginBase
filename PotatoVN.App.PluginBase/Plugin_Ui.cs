@@ -264,7 +264,7 @@ public partial class Plugin : IGalgamePageRightPanel
                 MinHeight = 28,
                 Padding = new Thickness(12, 3, 12, 3),
             };
-            closeButton.Click += (_, _) => window.Close();
+            closeButton.Click += (_, _) => DismissFloatWindow(game.Uuid);
 
             StackPanel buttonRow = new()
             {
@@ -286,6 +286,7 @@ public partial class Plugin : IGalgamePageRightPanel
             window.Closed += (_, _) => FloatingWindows.Remove(game.Uuid);
             window.Activate();
             if (Data.PinFloatOnTop) _ = BumpTopmostAfterMagpieAsync(window);
+            _ = FloatWatchdogAsync(game);
         }
         catch (Exception)
         {
@@ -307,10 +308,44 @@ public partial class Plugin : IGalgamePageRightPanel
         }
     }
 
-    private static void CloseFloatingWindow(Guid uuid)
+    private static void CloseFloatingWindow(Guid uuid) => DismissFloatWindow(uuid);
+
+    private static void DismissFloatWindow(Guid uuid)
     {
-        if (FloatingWindows.TryGetValue(uuid, out Window? window))
-            window.Close();
+        if (FloatingWindows.Remove(uuid, out Window? window))
+            window.AppWindow.Hide();
+    }
+
+    private static async Task FloatWatchdogAsync(Galgame game)
+    {
+        while (true)
+        {
+            await Task.Delay(5000);
+            if (!FloatingWindows.ContainsKey(game.Uuid)) return;
+            if (IsGameProcessRunning(game)) continue;
+            DismissFloatWindow(game.Uuid);
+            return;
+        }
+    }
+
+    private static bool IsGameProcessRunning(Galgame game)
+    {
+        string? installPath = game.LocalPath;
+        if (string.IsNullOrEmpty(installPath)) return true; // 无法判断 → 假定运行中，交给宿主消息
+        foreach (System.Diagnostics.Process process in System.Diagnostics.Process.GetProcesses())
+        {
+            try
+            {
+                string? file = process.MainModule?.FileName;
+                if (file is null) continue;
+                if (file.StartsWith(installPath, StringComparison.OrdinalIgnoreCase)) return true;
+            }
+            catch
+            {
+                // 权限受限进程，跳过
+            }
+        }
+        return false;
     }
 
     private static async Task BumpTopmostAfterMagpieAsync(Window window)
@@ -318,6 +353,7 @@ public partial class Plugin : IGalgamePageRightPanel
         try
         {
             await Task.Delay(3500);
+            if (!window.AppWindow.IsVisible) return; // 窗口已隐藏
             IntPtr hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
             SetWindowPos(hwnd, HwndTopmost, 0, 0, 0, 0, SwpNoMove | SwpNoSize | SwpNoActivate | SwpShowWindow);
         }
