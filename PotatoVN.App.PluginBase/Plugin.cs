@@ -1,7 +1,9 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
+using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -14,6 +16,7 @@ using GalgameManager.Models;
 using Microsoft.Windows.AppLifecycle;
 using Windows.ApplicationModel.Activation;
 using PotatoVN.App.PluginBase.Models;
+using PotatoVN.App.PluginBase.Guides;
 
 namespace PotatoVN.App.PluginBase
 {
@@ -26,6 +29,12 @@ namespace PotatoVN.App.PluginBase
         private readonly CancellationTokenSource _lifetimeCts = new();
         private CancellationTokenSource? _scheduledSaveCts;
         internal WalkthroughData Data { get; private set; } = new();
+
+        public Plugin()
+        {
+            _df2an = new Df2anGuideSource(_guidePages, () => Data.Domain, domain => Data.Domain = domain);
+            _ymgal = new YmgalGuideSource(_guidePages);
+        }
 
         public PluginInfo Info { get; } = new()
         {
@@ -93,9 +102,13 @@ namespace PotatoVN.App.PluginBase
 
         private void OnGameStopped(object recipient, GalgameStoppedMessage message)
         {
-            Data.ActiveGameUuid = null;
-            Data.ActiveGamePlayedAt = null;
-            HostApi.InvokeOnMainThread(() => CloseFloatingWindow(message.Value.Uuid));
+            Guid uuid = message.Value.Uuid;
+            if (Data.ActiveGameUuid == uuid)
+            {
+                Data.ActiveGameUuid = null;
+                Data.ActiveGamePlayedAt = null;
+            }
+            _hostApi.InvokeOnMainThread(() => CloseFloatingWindow(uuid));
         }
 
         private async Task TryRestoreFloatWindowAfterRestartAsync(CancellationToken token)
@@ -225,9 +238,15 @@ namespace PotatoVN.App.PluginBase
         private bool NormalizeData()
         {
             bool changed = false;
-            if (Data.TopicUrlMap is null)
+            if (Data.ReadingHistory is null)
             {
-                Data.TopicUrlMap = [];
+                Data.ReadingHistory = new();
+                changed = true;
+            }
+            if (Data.TopicUrlMap is { } legacy)
+            {
+                GuideHistory.Migrate(Data.ReadingHistory, legacy);
+                Data.TopicUrlMap = null;
                 changed = true;
             }
             if (Data.DefaultSource is not ("auto" or "2dfan" or "ymgal"))
@@ -238,12 +257,12 @@ namespace PotatoVN.App.PluginBase
             if (!Uri.TryCreate(Data.Domain, UriKind.Absolute, out Uri? domain) ||
                 domain.Scheme is not ("http" or "https"))
             {
-                Data.Domain = "https://2dfan.com";
+                Data.Domain = Df2anGuideSource.DefaultDomain;
                 changed = true;
             }
-            if (Data.Version != 1)
+            if (Data.Version < 2)
             {
-                Data.Version = 1;
+                Data.Version = 2;
                 changed = true;
             }
             return changed;
@@ -308,16 +327,18 @@ namespace PotatoVN.App.PluginBase.Models
     /// </summary>
     public partial class WalkthroughData : ObservableObject
     {
-        public int Version { get; set; } = 1;
+        public int Version { get; set; } = 2;
 
         /// <summary>2DFan 域名（官方域会被墙，备用域 2dfdf.de / 2dfmax.top）</summary>
-        [ObservableProperty] private string _domain = "https://2dfan.com";
+        [ObservableProperty] private string _domain = Df2anGuideSource.DefaultDomain;
 
         /// <summary>默认攻略来源："auto"（自动）| "2dfan" | "ymgal"</summary>
         [ObservableProperty] private string _defaultSource = "auto";
 
-        /// <summary>游戏 Uuid -> 2DFan 攻略 topic 页 URL</summary>
-        public Dictionary<Guid, string> TopicUrlMap { get; set; } = [];
+        public ConcurrentDictionary<Guid, GameGuideHistory> ReadingHistory { get; set; } = new();
+
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public Dictionary<Guid, string>? TopicUrlMap { get; set; }
 
         /// <summary>启动游戏时自动打开攻略浮窗</summary>
         [ObservableProperty] private bool _autoOpenFloatOnLaunch = true;
@@ -331,7 +352,7 @@ namespace PotatoVN.App.PluginBase.Models
         /// <summary>浮窗是否默认置顶</summary>
         [ObservableProperty] private bool _pinFloatOnTop = true;
 
-        /// <summary>极简模式：浮窗只显示攻略内容与一个切换按钮</summary>
+        /// <summary>浮窗是否默认使用简洁模式</summary>
         [ObservableProperty] private bool _minimalMode = false;
     }
 }
