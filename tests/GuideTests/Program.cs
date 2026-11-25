@@ -10,9 +10,13 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Moon archive and article parsing", ReadMoonAsync),
     ("No results, layout changes, and network errors remain distinct", DistinguishFailuresAsync),
     ("Automatic fallback and explicit source selection", FallbackAsync),
+    ("Local mount preference is opt-in", () => RunSync(LocalDefaultSelection)),
     ("Article ID remains usable after mirror change", MirrorAsync),
     ("Legacy links, independent sources, and JSON round trip", () => RunSync(History)),
     ("Paragraph bookmarks survive insertions and find ignores case", () => RunSync(Bookmarks)),
+    ("Local text supports Unicode and legacy encodings", () => RunSync(LocalEncodings)),
+    ("Local discovery favors remembered files and mounts survive folder moves", LocalDiscoveryAsync),
+    ("Local reader rejects binary, empty and oversized input", InvalidLocalFilesAsync),
     ("Caller cancellation interrupts the response body", CancelBodyAsync),
     ("Stalled response body times out", TimeoutBodyAsync),
 };
@@ -93,6 +97,15 @@ static async Task FallbackAsync()
     Check(bothFailed.Source == GuideSource.Df2an, "Keep the first browser entry when the secondary archive ID is missing.");
 }
 
+static void LocalDefaultSelection()
+{
+    Check(GuideSearch.InitialSource("auto", true) is null, "A mount should not affect online automatic selection.");
+    Check(GuideSearch.InitialSource("local-first", true) == GuideSource.Local, "Local-first should start on a mounted guide.");
+    Check(GuideSearch.InitialSource("local-first", false) is null, "Local-first should use online automatic if nothing is mounted.");
+    Check(GuideSearch.InitialSource("2dfan", true) == GuideSource.Df2an &&
+        GuideSearch.InitialSource("ymgal", true) == GuideSource.Ymgal, "An explicit online source must be preserved.");
+}
+
 static async Task MirrorAsync()
 {
     string domain = Df2anGuideSource.DefaultDomain;
@@ -146,6 +159,100 @@ static void Bookmarks()
     Check(changed.FindParagraph(position) == 2, "Expected a paragraph anchor after an insertion.");
     Check(new GuideText("路线 A").FindParagraph(position) == -1, "Deleted content should use the saved fraction.");
     Check(changed.Find("路线 a").SequenceEqual([5]), "Expected case-insensitive matching with UTF-16 offsets.");
+}
+
+static void LocalEncodings()
+{
+    const string chinese = "路线一：从学校开始。";
+    const string japanese = "攻略：まずここからはじめる。";
+    const string traditional = "路線一：從學校開始。";
+    byte[] CodePage(int page, string text) =>
+        CodePagesEncodingProvider.Instance.GetEncoding(page)!.GetBytes(text);
+    byte[] WithBom(Encoding encoding, string text) => encoding.GetPreamble().Concat(encoding.GetBytes(text)).ToArray();
+
+    Check(LocalGuideFile.Decode(WithBom(Encoding.UTF8, chinese), LocalGuideEncoding.Auto) == chinese, "UTF-8 BOM failed.");
+    Check(LocalGuideFile.Decode(WithBom(Encoding.Unicode, japanese), LocalGuideEncoding.Auto) == japanese, "UTF-16 LE failed.");
+    Check(LocalGuideFile.Decode(WithBom(Encoding.BigEndianUnicode, chinese), LocalGuideEncoding.Auto) == chinese, "UTF-16 BE failed.");
+    Check(LocalGuideFile.Decode(WithBom(new UTF32Encoding(true, true), japanese), LocalGuideEncoding.Auto) == japanese, "UTF-32 BE failed.");
+    Check(LocalGuideFile.Decode(Encoding.Unicode.GetBytes("Route A\r\n攻略"), LocalGuideEncoding.Auto) == "Route A\r\n攻略",
+        "UTF-16 without a BOM failed.");
+    Check(LocalGuideFile.Decode(CodePage(54936, chinese), LocalGuideEncoding.Auto) == chinese, "GB18030 failed.");
+    Check(LocalGuideFile.Decode(CodePage(932, japanese), LocalGuideEncoding.Auto) == japanese, "Shift-JIS failed.");
+    Check(LocalGuideFile.Decode(CodePage(950, traditional), LocalGuideEncoding.Big5) == traditional, "Manual Big5 failed.");
+    Check(LocalGuideFile.Decode(CodePage(51932, japanese), LocalGuideEncoding.EucJp) == japanese, "Manual EUC-JP failed.");
+    Check(LocalGuideFile.Decode([0xB3, 0x1A], LocalGuideEncoding.Dos437) == "│", "Legacy NFO decoding failed.");
+}
+
+static async Task LocalDiscoveryAsync()
+{
+    string root = Directory.CreateTempSubdirectory("pvn-guide-").FullName;
+    try
+    {
+        string game = Directory.CreateDirectory(Path.Combine(root, "game")).FullName;
+        string elsewhere = Directory.CreateDirectory(Path.Combine(root, "outside")).FullName;
+        string remembered = Path.Combine(elsewhere, "已选攻略.md");
+        string route = Path.Combine(game, "路线.txt");
+        string readme = Path.Combine(game, "Readme.txt");
+        foreach (string path in new[] { remembered, route, readme, Path.Combine(game, "收藏.pdf") })
+            await File.WriteAllTextAsync(path, "路线一\r\n回到学校。");
+
+        var candidates = LocalGuideFile.Discover(game, remembered, default);
+        Check(candidates.Select(file => file.Path).SequenceEqual([remembered, route, readme]) &&
+            candidates[0].RememberedByHost, "Expected remembered file first, followed by guide filenames.");
+        Check(LocalGuideFile.Discover(game, "路线.txt", default).Count == 2, "Candidate list must deduplicate host text.");
+        var mount = LocalGuideFile.Mount(route, game, LocalGuideEncoding.Auto);
+        var moved = Path.Combine(root, "moved");
+        Directory.Move(game, moved);
+        string? relocated = LocalGuideFile.Resolve(mount, moved);
+        Check(mount.InGameFolder && relocated == Path.Combine(moved, "路线.txt"), "Moving the game should retain its local file.");
+        Check(await LocalGuideFile.ReadAsync(relocated!, mount.Encoding, default) == "路线一\n回到学校。",
+            "Local reader should preserve normalized lines.");
+        var external = LocalGuideFile.Mount(remembered, moved, LocalGuideEncoding.Auto);
+        Check(!external.InGameFolder && LocalGuideFile.Resolve(external, moved) == remembered,
+            "External files should retain their absolute path.");
+        Check(LocalGuideFile.Resolve(mount with { Path = Path.Combine("..", "outside", "已选攻略.md") }, moved) is null,
+            "A relative mount should stay in its game folder.");
+        Check(JsonSerializer.Deserialize<LocalGuideMount>(JsonSerializer.Serialize(mount)) == mount,
+            "A local mount should round-trip.");
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static async Task InvalidLocalFilesAsync()
+{
+    string root = Directory.CreateTempSubdirectory("pvn-invalid-").FullName;
+    try
+    {
+        string archive = Path.Combine(root, "archive.txt");
+        await File.WriteAllBytesAsync(archive, [0x50, 0x4B, 0x03, 0x04, 0]);
+        await CheckInvalid(archive);
+        string pdf = Path.Combine(root, "document.txt");
+        await File.WriteAllTextAsync(pdf, "%PDF-1.7");
+        await CheckInvalid(pdf);
+        string empty = Path.Combine(root, "empty.txt");
+        await File.WriteAllTextAsync(empty, " \r\n\t");
+        await CheckInvalid(empty);
+        string large = Path.Combine(root, "large.txt");
+        using (var stream = File.Create(large)) stream.SetLength(4 * 1024 * 1024 + 1);
+        await CheckInvalid(large);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+
+    static async Task CheckInvalid(string path)
+    {
+        try
+        {
+            await LocalGuideFile.ReadAsync(path, LocalGuideEncoding.Auto, default);
+            throw new InvalidOperationException($"Unexpected accepted file: {Path.GetFileName(path)}");
+        }
+        catch (InvalidDataException) { }
+    }
 }
 
 static async Task CancelBodyAsync()

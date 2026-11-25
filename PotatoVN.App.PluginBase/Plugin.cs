@@ -243,13 +243,18 @@ namespace PotatoVN.App.PluginBase
                 Data.ReadingHistory = new();
                 changed = true;
             }
+            if (Data.LocalGuides is null)
+            {
+                Data.LocalGuides = new();
+                changed = true;
+            }
             if (Data.TopicUrlMap is { } legacy)
             {
                 GuideHistory.Migrate(Data.ReadingHistory, legacy);
                 Data.TopicUrlMap = null;
                 changed = true;
             }
-            if (Data.DefaultSource is not ("auto" or "2dfan" or "ymgal"))
+            if (Data.DefaultSource is not ("auto" or "2dfan" or "ymgal" or "local-first"))
             {
                 Data.DefaultSource = "auto";
                 changed = true;
@@ -260,9 +265,9 @@ namespace PotatoVN.App.PluginBase
                 Data.Domain = Df2anGuideSource.DefaultDomain;
                 changed = true;
             }
-            if (Data.Version < 2)
+            if (Data.Version < 3)
             {
-                Data.Version = 2;
+                Data.Version = 3;
                 changed = true;
             }
             return changed;
@@ -327,15 +332,16 @@ namespace PotatoVN.App.PluginBase.Models
     /// </summary>
     public partial class WalkthroughData : ObservableObject
     {
-        public int Version { get; set; } = 2;
+        public int Version { get; set; } = 3;
 
         /// <summary>2DFan 域名（官方域会被墙，备用域 2dfdf.de / 2dfmax.top）</summary>
         [ObservableProperty] private string _domain = Df2anGuideSource.DefaultDomain;
 
-        /// <summary>默认攻略来源："auto"（自动）| "2dfan" | "ymgal"</summary>
+        /// <summary>默认攻略来源："auto"（在线自动）| "2dfan" | "ymgal" | "local-first"（本地优先）</summary>
         [ObservableProperty] private string _defaultSource = "auto";
 
         public ConcurrentDictionary<Guid, GameGuideHistory> ReadingHistory { get; set; } = new();
+        public ConcurrentDictionary<Guid, LocalGuideMount> LocalGuides { get; set; } = new();
 
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public Dictionary<Guid, string>? TopicUrlMap { get; set; }

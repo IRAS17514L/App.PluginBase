@@ -22,8 +22,9 @@ public partial class Plugin
 
     private sealed record PanelSnapshot(string StatusText, string? OpenSiteUrl, GuideSource Source, UIElement[] Children);
 
-    private sealed class PanelState(StackPanel content, TextBlock status, ScrollViewer scroll, Grid findHost)
+    private sealed class PanelState(Window window, StackPanel content, TextBlock status, ScrollViewer scroll, Grid findHost)
     {
+        public Window Window { get; } = window;
         public StackPanel Content { get; } = content;
         public TextBlock Status { get; } = status;
         public ScrollViewer Scroll { get; } = scroll;
@@ -34,11 +35,13 @@ public partial class Plugin
         public GuideSource CurrentSource;
         public string? OpenSiteUrl;
         public Button? SiteButton;
+        public Button? LocalFileButton;
         public Button? FindButton;
         public Button? CompactFindButton;
         public ToggleButton? SourceAuto;
         public ToggleButton? Source2dfan;
         public ToggleButton? SourceYmgal;
+        public ToggleButton? SourceLocal;
         public ProgressRing? ProgressRing;
         public Button? CompactBackButton;
         public Button? BarBackButton;
@@ -47,21 +50,16 @@ public partial class Plugin
         public Stack<PanelSnapshot> BackStack { get; } = [];
     }
 
-    private FrameworkElement BuildGuidePanel(out PanelState state)
+    private FrameworkElement BuildGuidePanel(Window window, Guid gameId, out PanelState state)
     {
         TextBlock status = new() { TextWrapping = TextWrapping.Wrap, FontSize = 12, Foreground = GetSecondaryBrush() };
         StackPanel content = new() { Spacing = 4 };
         ScrollViewer scroll = new() { Content = content, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
         Grid findHost = new() { Visibility = Visibility.Collapsed };
 
-        var panel = new PanelState(content, status, scroll, findHost)
+        var panel = new PanelState(window, content, status, scroll, findHost)
         {
-            PreferredSource = Data.DefaultSource switch
-            {
-                "2dfan" => GuideSource.Df2an,
-                "ymgal" => GuideSource.Ymgal,
-                _ => null,
-            }
+            PreferredSource = GuideSearch.InitialSource(Data.DefaultSource, Data.LocalGuides.ContainsKey(gameId)),
         };
         state = panel;
 
@@ -97,6 +95,9 @@ public partial class Plugin
         state.BackStack.Clear();
         UpdateBackButtons(state);
         UpdateSourceToggleState(state);
+
+        if (state.PreferredSource == GuideSource.Local)
+            return ShowLocalAsync(game, state, resume: true);
 
         GuideGame names = DescribeGame(game);
         Data.ReadingHistory.TryGetValue(game.Uuid, out GameGuideHistory? history);
@@ -258,19 +259,24 @@ public partial class Plugin
             Data.ReadingHistory.TryGetValue(game.Uuid, out GameGuideHistory? history);
             GuideReading? previous = history?.Get(reference.Source);
             GuideBookmark? bookmark = previous?.Article == reference ? previous.Bookmark : null;
-            GuideReader reader = new(article.Text, bookmark, state.Scroll, state.FindHost, position =>
+            PresentArticle(state, article.Text, bookmark, position =>
             {
                 if (GuideHistory.RememberPosition(Data.ReadingHistory, game.Uuid, reference, position))
                     SaveData();
             });
 
-            state.Content.Children.Add(reader.Body);
-            state.Reader = reader;
-            state.Status.Visibility = Visibility.Collapsed;
-            UpdateFindButton(state);
             GuideHistory.Remember(Data.ReadingHistory, game.Uuid, new GuideReading(reference, article.Title, bookmark));
             SaveData();
         });
+    }
+
+    private static void PresentArticle(PanelState state, string text, GuideBookmark? bookmark, Action<GuideBookmark> remember)
+    {
+        GuideReader reader = new(text, bookmark, state.Scroll, state.FindHost, remember);
+        state.Content.Children.Add(reader.Body);
+        state.Reader = reader;
+        state.Status.Visibility = Visibility.Collapsed;
+        UpdateFindButton(state);
     }
 
     private async Task RunPanelLoadAsync(PanelState state, string loadingText, Func<CancellationToken, Task> load)
@@ -349,6 +355,7 @@ public partial class Plugin
         if (state.SourceAuto is not null) state.SourceAuto.IsChecked = state.PreferredSource is null;
         if (state.Source2dfan is not null) state.Source2dfan.IsChecked = state.PreferredSource == GuideSource.Df2an;
         if (state.SourceYmgal is not null) state.SourceYmgal.IsChecked = state.PreferredSource == GuideSource.Ymgal;
+        if (state.SourceLocal is not null) state.SourceLocal.IsChecked = state.PreferredSource == GuideSource.Local;
     }
 
     private static void UpdateBackButtons(PanelState state)

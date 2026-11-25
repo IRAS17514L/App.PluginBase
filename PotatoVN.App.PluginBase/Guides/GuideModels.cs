@@ -8,7 +8,7 @@ using System.Threading.Tasks;
 
 namespace PotatoVN.App.PluginBase.Guides;
 
-public enum GuideSource { Df2an = 1, Ymgal = 2 }
+public enum GuideSource { Df2an = 1, Ymgal = 2, Local = 3 }
 
 public readonly record struct GuideReference(GuideSource Source, string Id)
 {
@@ -114,6 +114,14 @@ internal static class GuideIds
 
 internal static class GuideSearch
 {
+    internal static GuideSource? InitialSource(string setting, bool hasLocalMount) => setting switch
+    {
+        "2dfan" => GuideSource.Df2an,
+        "ymgal" => GuideSource.Ymgal,
+        "local-first" when hasLocalMount => GuideSource.Local,
+        _ => null,
+    };
+
     internal static GuideSource Preferred(GuideSource? setting, GameGuideHistory? history, GuideGame game)
     {
         if (setting is { } explicitSource) return explicitSource;

@@ -25,13 +25,14 @@ public partial class Plugin : IGalgamePageRightPanel
     public FrameworkElement CreateSettingUi()
     {
         ComboBox sourceBox = new() { MinWidth = 200 };
-        sourceBox.Items.Add("自动");
+        sourceBox.Items.Add("在线自动");
         sourceBox.Items.Add("2DFan");
         sourceBox.Items.Add("月幕");
-        sourceBox.SelectedIndex = Data.DefaultSource switch { "2dfan" => 1, "ymgal" => 2, _ => 0 };
+        sourceBox.Items.Add("本地优先");
+        sourceBox.SelectedIndex = Data.DefaultSource switch { "2dfan" => 1, "ymgal" => 2, "local-first" => 3, _ => 0 };
         sourceBox.SelectionChanged += (_, _) =>
         {
-            Data.DefaultSource = sourceBox.SelectedIndex switch { 1 => "2dfan", 2 => "ymgal", _ => "auto" };
+            Data.DefaultSource = sourceBox.SelectedIndex switch { 1 => "2dfan", 2 => "ymgal", 3 => "local-first", _ => "auto" };
         };
 
         ComboBox domainBox = new() { MinWidth = 200 };
@@ -83,6 +84,11 @@ public partial class Plugin : IGalgamePageRightPanel
         clearButton.Click += (_, _) =>
         {
             Data.ReadingHistory.Clear();
+            foreach (var (gameId, guide) in Data.LocalGuides)
+            {
+                if (guide is { Bookmark: not null })
+                    Data.LocalGuides.TryUpdate(gameId, guide with { Bookmark = null }, guide);
+            }
             SaveData();
             if (associationSetting is not null)
                 associationSetting.Description = "当前没有阅读记录";
@@ -109,14 +115,16 @@ public partial class Plugin : IGalgamePageRightPanel
         settingsHelp.Flyout = CreateGuideHelp();
         panel.Children.Add(new StdSetting("浮窗显示", "独占全屏可能遮住攻略浮窗。", settingsHelp));
         panel.Children.Add(new StdSetting("默认攻略来源",
-            "自动模式优先续读，其次按游戏档案选择来源，查不到攻略时尝试另一来源。", sourceBox));
+            "在线自动在 2DFan 和月幕之间选择。本地优先仅在游戏已有挂载时默认打开本地正文。", sourceBox));
         panel.Children.Add(new StdSetting("2DFan 域名",
             "官方域 2dfan.com 在中国大陆无法访问，域名失效时可点“自动检测”选择可用备用域", domainStack));
+        int readingCount = Data.ReadingHistory.Keys
+            .Union(Data.LocalGuides.Where(pair => pair.Value?.Bookmark is not null).Select(pair => pair.Key)).Count();
         associationSetting = new StdSetting("已保存的阅读记录",
-            Data.ReadingHistory.IsEmpty
+            readingCount == 0
                 ? "当前没有阅读记录"
-                : $"已记录 {Data.ReadingHistory.Count} 个游戏的攻略与阅读位置", clearButton);
-        clearButton.IsEnabled = !Data.ReadingHistory.IsEmpty;
+                : $"已记录 {readingCount} 个游戏的在线攻略或阅读位置", clearButton);
+        clearButton.IsEnabled = readingCount > 0;
         panel.Children.Add(associationSetting);
         return panel;
     }
@@ -162,7 +170,7 @@ public partial class Plugin : IGalgamePageRightPanel
                 return true;
             }
 
-            Window window = new() { Title = $"攻略 - {game.Name.Value}" };
+            Window window = new() { Title = game.Name.Value ?? string.Empty };
 
             OverlappedPresenter? presenter = window.AppWindow.Presenter as OverlappedPresenter;
             if (presenter is not null)
@@ -189,25 +197,29 @@ public partial class Plugin : IGalgamePageRightPanel
             int ToPhysicalPixels(double logicalPixels) =>
                 Math.Max(1, (int)Math.Ceiling(logicalPixels * GetScale()));
 
-            FrameworkElement panel = BuildGuidePanel(out PanelState state);
+            FrameworkElement panel = BuildGuidePanel(window, game.Uuid, out PanelState state);
             var windowPin = new FloatingWindowPin(window, Data.PinFloatOnTop);
             state.WindowPin = windowPin;
 
-            var sourceAuto = CreateGuideToggle("自动", "优先续读，找不到攻略时尝试另一来源");
+            var sourceAuto = CreateGuideToggle("在线自动", "续读在线攻略，或在 2DFan 和月幕之间自动查找");
             var source2dfan = CreateGuideToggle("2DFan", "只在 2DFan 查找攻略");
             var sourceYmgal = CreateGuideToggle("月幕", "只在月幕查找攻略");
+            var sourceLocal = CreateGuideToggle("本地", "打开或挂载本地文本攻略");
             state.SourceAuto = sourceAuto;
             state.Source2dfan = source2dfan;
             state.SourceYmgal = sourceYmgal;
+            state.SourceLocal = sourceLocal;
             sourceAuto.Click += (_, _) => SelectSource(null);
             source2dfan.Click += (_, _) => SelectSource(GuideSource.Df2an);
             sourceYmgal.Click += (_, _) => SelectSource(GuideSource.Ymgal);
+            sourceLocal.Click += (_, _) => SelectSource(GuideSource.Local);
 
             void SelectSource(GuideSource? source)
             {
                 if (state.PreferredSource == source)
                 {
                     UpdateSourceToggleState(state);
+                    if (source == GuideSource.Local) _ = ShowLocalAsync(game, state);
                     return;
                 }
                 state.PreferredSource = source;
@@ -249,9 +261,11 @@ public partial class Plugin : IGalgamePageRightPanel
             var refreshButton = CreateGuideButton("刷新", "重新加载攻略面板", () =>
             {
                 CancelPanelRequest(state);
-                if (state.PreferredSource is null || state.CurrentSource == GuideSource.Df2an)
+                if (state.CurrentSource != GuideSource.Local &&
+                    (state.PreferredSource is null || state.CurrentSource == GuideSource.Df2an))
                     _df2an.ClearCache();
-                if (state.PreferredSource is null || state.CurrentSource == GuideSource.Ymgal)
+                if (state.CurrentSource != GuideSource.Local &&
+                    (state.PreferredSource is null || state.CurrentSource == GuideSource.Ymgal))
                     _ymgal.ClearCache();
                 _ = ShowSourceAsync(game, state);
             });
@@ -276,6 +290,10 @@ public partial class Plugin : IGalgamePageRightPanel
             };
             state.SiteButton = siteButton;
             siteButton.IsEnabled = false;
+            var localFileButton = CreateGuideButton("本地文件", "更换本地攻略或选择文件编码",
+                () => _ = ShowLocalAsync(game, state));
+            localFileButton.Visibility = Visibility.Collapsed;
+            state.LocalFileButton = localFileButton;
 
             var progressRing = new ProgressRing
             {
@@ -287,7 +305,7 @@ public partial class Plugin : IGalgamePageRightPanel
             state.ProgressRing = progressRing;
 
             var sourceLabel = new TextBlock { Text = "攻略来源", VerticalAlignment = VerticalAlignment.Center, FontSize = 12 };
-            var sourceButtons = GuideCommandRow(sourceLabel, sourceAuto, source2dfan, sourceYmgal);
+            var sourceButtons = GuideCommandRow(sourceLabel, sourceAuto, source2dfan, sourceYmgal, sourceLocal);
             var sourceRow = new Grid { ColumnSpacing = 8 };
             sourceRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             sourceRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -295,7 +313,7 @@ public partial class Plugin : IGalgamePageRightPanel
             Grid.SetColumn(pinButton, 1);
             sourceRow.Children.Add(pinButton);
 
-            var readingCommands = GuideCommandRow(backButton, refreshButton, findButton, siteButton, progressRing);
+            var readingCommands = GuideCommandRow(backButton, refreshButton, findButton, siteButton, localFileButton, progressRing);
             var detailedTools = new StackPanel { Spacing = 6, Margin = new Thickness(0, 6, 0, 0) };
             detailedTools.Children.Add(sourceRow);
             detailedTools.Children.Add(readingCommands);
@@ -318,7 +336,7 @@ public partial class Plugin : IGalgamePageRightPanel
             var dragRegion = new Grid { MinWidth = 24, Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent) };
             var titleText = new TextBlock
             {
-                Text = $"攻略 · {game.Name.Value}",
+                Text = window.Title,
                 FontSize = 13,
                 FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
                 MaxLines = 1,
@@ -788,7 +806,14 @@ public partial class Plugin : IGalgamePageRightPanel
     private static void SetOpenSite(PanelState state, string? url)
     {
         state.OpenSiteUrl = url;
-        if (state.SiteButton is not null) state.SiteButton.IsEnabled = url is not null;
+        bool local = state.CurrentSource == GuideSource.Local;
+        if (state.SiteButton is not null)
+        {
+            state.SiteButton.Visibility = local ? Visibility.Collapsed : Visibility.Visible;
+            state.SiteButton.IsEnabled = url is not null;
+        }
+        if (state.LocalFileButton is not null)
+            state.LocalFileButton.Visibility = local ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private static void AddResultRow(StackPanel content, int index, string text, Func<Task> onClick)
