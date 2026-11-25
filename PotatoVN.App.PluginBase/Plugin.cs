@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -34,13 +34,16 @@ namespace PotatoVN.App.PluginBase
         {
             _df2an = new Df2anGuideSource(_guidePages, () => Data.Domain, domain => Data.Domain = domain);
             _ymgal = new YmgalGuideSource(_guidePages);
+            _cngal = new CngalGuideSource(_guidePages);
+            _seiya = new SeiyaGuideSource(_guidePages);
+            _steam = new SteamGuideSource(_guidePages);
         }
 
         public PluginInfo Info { get; } = new()
         {
             Id = new Guid("c9a68427-b773-4a98-bb66-2c6f4a4ebe37"),
             Name = "攻略面板",
-            Description = "提供攻略检索与独立浮窗阅读，支持 2DFan 与月幕（中文）双来源、自动检索和手动关联直达。",
+            Description = "提供攻略检索与独立浮窗阅读，支持多站攻略检索、本地文本、自定义链接和 Steam 社区指南。",
         };
 
         public async Task InitializeAsync(IPotatoVnApi hostApi)
@@ -248,13 +251,33 @@ namespace PotatoVN.App.PluginBase
                 Data.LocalGuides = new();
                 changed = true;
             }
+            if (Data.SavedLinks is null)
+            {
+                Data.SavedLinks = new();
+                changed = true;
+            }
+            foreach (var (gameId, links) in Data.SavedLinks)
+            {
+                var valid = links?.Where(link => link is not null && link.Id != Guid.Empty &&
+                    GuideWebLinks.TryParse(link.Url, out _)).DistinctBy(link => link.Id).ToArray() ?? [];
+                if (valid.Length == 0)
+                    changed |= Data.SavedLinks.TryRemove(gameId, out _);
+                else if (valid.Length != links!.Length)
+                    changed |= Data.SavedLinks.TryUpdate(gameId, valid, links);
+            }
             if (Data.TopicUrlMap is { } legacy)
             {
                 GuideHistory.Migrate(Data.ReadingHistory, legacy);
                 Data.TopicUrlMap = null;
                 changed = true;
             }
-            if (Data.DefaultSource is not ("auto" or "2dfan" or "ymgal" or "local-first"))
+            GuideSource[] onlineSources = GuideAggregation.NormalizeSources(Data.AutoSearchSources);
+            if (Data.AutoSearchSources is null || !Data.AutoSearchSources.SequenceEqual(onlineSources))
+            {
+                Data.AutoSearchSources = onlineSources;
+                changed = true;
+            }
+            if (Data.DefaultSource is not ("auto" or "2dfan" or "ymgal" or "cngal" or "seiya" or "local-first"))
             {
                 Data.DefaultSource = "auto";
                 changed = true;
@@ -265,9 +288,9 @@ namespace PotatoVN.App.PluginBase
                 Data.Domain = Df2anGuideSource.DefaultDomain;
                 changed = true;
             }
-            if (Data.Version < 3)
+            if (Data.Version < 5)
             {
-                Data.Version = 3;
+                Data.Version = 5;
                 changed = true;
             }
             return changed;
@@ -332,16 +355,19 @@ namespace PotatoVN.App.PluginBase.Models
     /// </summary>
     public partial class WalkthroughData : ObservableObject
     {
-        public int Version { get; set; } = 3;
+        public int Version { get; set; } = 5;
 
         /// <summary>2DFan 域名（官方域会被墙，备用域 2dfdf.de / 2dfmax.top）</summary>
         [ObservableProperty] private string _domain = Df2anGuideSource.DefaultDomain;
 
-        /// <summary>默认攻略来源："auto"（在线自动）| "2dfan" | "ymgal" | "local-first"（本地优先）</summary>
+        /// <summary>默认攻略来源，local-first 表示优先使用已挂载的本地攻略。</summary>
         [ObservableProperty] private string _defaultSource = "auto";
+
+        [ObservableProperty] private GuideSource[] _autoSearchSources = GuideAggregation.NormalizeSources(null);
 
         public ConcurrentDictionary<Guid, GameGuideHistory> ReadingHistory { get; set; } = new();
         public ConcurrentDictionary<Guid, LocalGuideMount> LocalGuides { get; set; } = new();
+        public ConcurrentDictionary<Guid, SavedGuideLink[]> SavedLinks { get; set; } = new();
 
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public Dictionary<Guid, string>? TopicUrlMap { get; set; }

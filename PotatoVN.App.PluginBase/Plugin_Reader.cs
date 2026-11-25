@@ -19,6 +19,9 @@ public partial class Plugin
     private readonly GuidePageClient _guidePages = new();
     private readonly Df2anGuideSource _df2an;
     private readonly YmgalGuideSource _ymgal;
+    private readonly CngalGuideSource _cngal;
+    private readonly SeiyaGuideSource _seiya;
+    private readonly SteamGuideSource _steam;
 
     private sealed record PanelSnapshot(string StatusText, string? OpenSiteUrl, GuideSource Source, UIElement[] Children);
 
@@ -33,15 +36,13 @@ public partial class Plugin
         public FloatingWindowPin? WindowPin;
         public GuideSource? PreferredSource;
         public GuideSource CurrentSource;
+        public Guid? ActiveSavedLink;
         public string? OpenSiteUrl;
         public Button? SiteButton;
         public Button? LocalFileButton;
         public Button? FindButton;
         public Button? CompactFindButton;
-        public ToggleButton? SourceAuto;
-        public ToggleButton? Source2dfan;
-        public ToggleButton? SourceYmgal;
-        public ToggleButton? SourceLocal;
+        public List<(GuideSource? Source, ToggleButton Button)> SourceToggles { get; } = [];
         public ProgressRing? ProgressRing;
         public Button? CompactBackButton;
         public Button? BarBackButton;
@@ -96,21 +97,27 @@ public partial class Plugin
         UpdateBackButtons(state);
         UpdateSourceToggleState(state);
 
+        state.ActiveSavedLink = null;
         if (state.PreferredSource == GuideSource.Local)
             return ShowLocalAsync(game, state, resume: true);
+        if (state.PreferredSource == GuideSource.SavedLinks)
+            return ShowSavedLinks(game, state);
 
         GuideGame names = DescribeGame(game);
-        Data.ReadingHistory.TryGetValue(game.Uuid, out GameGuideHistory? history);
-        GuideSource source = GuideSearch.Preferred(state.PreferredSource, history, names);
+        if (state.PreferredSource is not { } source)
+            return ShowAggregatedGuidesAsync(game, names, state);
+
         state.CurrentSource = source;
+        if (source is GuideSource.Cngal or GuideSource.Seiya)
+            return ShowWebSourceAsync(game, names, state, source);
+
+        Data.ReadingHistory.TryGetValue(game.Uuid, out GameGuideHistory? history);
         if (history?.Get(source) is not { } reading)
-            return RunPanelLoadAsync(state, $"正在查找{SourceName(source)}攻略…",
-                token => FindCandidatesAsync(game, names, source, state, token));
+            return SearchSingleSiteAsync(game, names, source, state);
 
         ShowSavedActions(game, names, state, reading);
         PushBack(state);
-        return OpenArticleAsync(game, state, reading.Article, reading.Title,
-            state.PreferredSource is null ? names : null);
+        return OpenArticleAsync(game, state, reading.Article, reading.Title);
     }
 
     private void ShowSavedActions(Galgame game, GuideGame names, PanelState state, GuideReading reading)
@@ -129,42 +136,36 @@ public partial class Plugin
         AddResultRow(state.Content, 0, "重新查找攻略", () =>
         {
             PushBack(state);
-            return RunPanelLoadAsync(state, $"正在查找{SourceName(reading.Article.Source)}攻略…",
-                token => FindCandidatesAsync(game, names, reading.Article.Source, state, token));
+            return SearchSingleSiteAsync(game, names, reading.Article.Source, state);
         });
     }
+
+    private Task SearchSingleSiteAsync(Galgame game, GuideGame names, GuideSource source, PanelState state) =>
+        RunPanelLoadAsync(state, $"正在查找{SourceName(source)}攻略…",
+            token => FindCandidatesAsync(game, names, source, state, token));
 
     private async Task FindCandidatesAsync(Galgame game, GuideGame names, GuideSource source, PanelState state,
         CancellationToken token)
     {
-        var found = await GuideSearch.FindAsync(source, state.PreferredSource is null, (site, ct) =>
-        {
-            state.Status.Text = $"正在查找{SourceName(site)}攻略…";
-            return site == GuideSource.Df2an ? _df2an.SearchAsync(names, ct) : _ymgal.SearchAsync(names, ct);
-        }, token);
+        var result = source == GuideSource.Df2an ? await _df2an.SearchAsync(names, token) : await _ymgal.SearchAsync(names, token);
         if (!IsCurrentPanelRequest(state, token)) return;
 
-        state.CurrentSource = found.Source;
-        SetOpenSite(state, found.Result.BrowserUrl?.AbsoluteUri);
-        if (found.Result.Value is not { } entries)
+        state.CurrentSource = source;
+        SetOpenSite(state, result.BrowserUrl?.AbsoluteUri);
+        if (result.Value is not { } entries)
         {
-            string summary = DescribeIssue(found.Source, found.Result.Issue);
-            state.Status.Text = found.Other is { } other
-                ? $"{DescribeIssue(GuideSearch.Alternate(found.Source), other.Issue)}\n{summary}"
-                : summary;
+            state.Status.Text = DescribeIssue(source, result.Issue);
+            AddOtherGuideActions(game, names, state);
             return;
         }
 
-        string? reason = found.Other is { } previous
-            ? DescribeIssue(GuideSearch.Alternate(found.Source), previous.Issue)
-            : null;
-        if (found.Source == GuideSource.Ymgal)
+        if (source == GuideSource.Ymgal)
         {
-            ShowArticles(game, state, GuideSource.Ymgal, entries, reason);
+            ShowArticles(game, state, source, entries);
             return;
         }
 
-        state.Status.Text = WithReason(reason, "选择对应的 2DFan 游戏条目");
+        state.Status.Text = "选择对应的 2DFan 游戏条目";
         for (int i = 0; i < entries.Count; i++)
         {
             GuideLink subject = entries[i];
@@ -196,32 +197,14 @@ public partial class Plugin
             return;
         }
 
-        string reason = DescribeIssue(GuideSource.Df2an, topics.Issue);
-        if (state.PreferredSource is not null || !GuideIds.IsValid(names.YmgalId))
-        {
-            state.Status.Text = reason;
-            return;
-        }
-
-        state.Status.Text = WithReason(reason, "正在查找月幕攻略…");
-        var alternate = await _ymgal.SearchAsync(names, token);
-        if (!IsCurrentPanelRequest(state, token)) return;
-        if (alternate.Value is { } articles)
-        {
-            SetOpenSite(state, alternate.BrowserUrl?.AbsoluteUri);
-            ShowArticles(game, state, GuideSource.Ymgal, articles, reason);
-        }
-        else
-        {
-            state.Status.Text = WithReason(reason, DescribeIssue(GuideSource.Ymgal, alternate.Issue));
-        }
+        state.Status.Text = DescribeIssue(GuideSource.Df2an, topics.Issue);
+        AddOtherGuideActions(game, names, state);
     }
 
-    private void ShowArticles(Galgame game, PanelState state, GuideSource source, IReadOnlyList<GuideLink> articles,
-        string? reason = null)
+    private void ShowArticles(Galgame game, PanelState state, GuideSource source, IReadOnlyList<GuideLink> articles)
     {
         state.CurrentSource = source;
-        state.Status.Text = WithReason(reason, $"选择{SourceName(source)}文章（含攻略与感想）");
+        state.Status.Text = $"选择{SourceName(source)}文章";
         for (int i = 0; i < articles.Count; i++)
         {
             GuideLink article = articles[i];
@@ -233,26 +216,20 @@ public partial class Plugin
         }
     }
 
-    private Task OpenArticleAsync(Galgame game, PanelState state, GuideReference reference, string? title,
-        GuideGame? retryDiscovery = null)
+    private Task OpenArticleAsync(Galgame game, PanelState state, GuideReference reference, string? title)
     {
         state.CurrentSource = reference.Source;
         return RunPanelLoadAsync(state, $"正在打开{SourceName(reference.Source)}正文…", async token =>
         {
             string titleOrFallback = string.IsNullOrWhiteSpace(title) ? $"{SourceName(reference.Source)}攻略" : title;
-            var result = reference.Source == GuideSource.Df2an
-                ? await _df2an.ReadArticleAsync(reference.Id, titleOrFallback, token)
-                : await _ymgal.ReadArticleAsync(reference.Id, titleOrFallback, token);
+            var result = await ReadOnlineArticleAsync(reference, titleOrFallback, token);
             if (!IsCurrentPanelRequest(state, token)) return;
             SetOpenSite(state, result.BrowserUrl?.AbsoluteUri);
             if (result.Value is not { } article)
             {
-                if (result.Issue == GuideIssue.ArticleMissing && retryDiscovery is not null)
-                {
-                    await FindCandidatesAsync(game, retryDiscovery, reference.Source, state, token);
-                    return;
-                }
                 state.Status.Text = DescribeIssue(reference.Source, result.Issue);
+                if (result.BrowserUrl is { } url)
+                    AddResultRow(state.Content, 0, "在浏览器打开原文", () => OpenGuideInBrowserAsync(url.AbsoluteUri));
                 return;
             }
 
@@ -269,6 +246,11 @@ public partial class Plugin
             SaveData();
         });
     }
+
+    private Task<GuideResult<GuideArticle>> ReadOnlineArticleAsync(GuideReference reference, string title,
+        CancellationToken token) => reference.Source == GuideSource.Df2an
+            ? _df2an.ReadArticleAsync(reference.Id, title, token)
+            : _ymgal.ReadArticleAsync(reference.Id, title, token);
 
     private static void PresentArticle(PanelState state, string text, GuideBookmark? bookmark, Action<GuideBookmark> remember)
     {
@@ -345,6 +327,7 @@ public partial class Plugin
         state.Status.Text = snapshot.StatusText;
         state.Status.Visibility = Visibility.Visible;
         state.CurrentSource = snapshot.Source;
+        state.ActiveSavedLink = null;
         SetOpenSite(state, snapshot.OpenSiteUrl);
         UpdateBackButtons(state);
         UpdateProgress(state, false);
@@ -352,10 +335,8 @@ public partial class Plugin
 
     private static void UpdateSourceToggleState(PanelState state)
     {
-        if (state.SourceAuto is not null) state.SourceAuto.IsChecked = state.PreferredSource is null;
-        if (state.Source2dfan is not null) state.Source2dfan.IsChecked = state.PreferredSource == GuideSource.Df2an;
-        if (state.SourceYmgal is not null) state.SourceYmgal.IsChecked = state.PreferredSource == GuideSource.Ymgal;
-        if (state.SourceLocal is not null) state.SourceLocal.IsChecked = state.PreferredSource == GuideSource.Local;
+        foreach (var (source, button) in state.SourceToggles)
+            button.IsChecked = source == state.PreferredSource;
     }
 
     private static void UpdateBackButtons(PanelState state)
@@ -382,19 +363,25 @@ public partial class Plugin
     }
 
     private static GuideGame DescribeGame(Galgame game) => new(game.CnName, game.OriginalName.Value,
-        game.Name.Value, game.Ids?.ElementAtOrDefault((int)RssType.Ymgal));
+        game.Name.Value, game.Ids?.ElementAtOrDefault((int)RssType.Ymgal),
+        game.Ids?.ElementAtOrDefault((int)RssType.Cngal), game.Ids?.ElementAtOrDefault((int)RssType.Steam));
 
-    private static string SourceName(GuideSource source) => source == GuideSource.Df2an ? "2DFan" : "月幕";
-
-    private static string WithReason(string? reason, string status) =>
-        reason is null ? status : $"{reason}\n{status}";
+    private static string SourceName(GuideSource source) => source switch
+    {
+        GuideSource.Df2an => "2DFan",
+        GuideSource.Ymgal => "月幕",
+        GuideSource.Cngal => "CnGal",
+        GuideSource.Seiya => "誠也の部屋",
+        GuideSource.Steam => "Steam",
+        _ => throw new ArgumentOutOfRangeException(nameof(source)),
+    };
 
     private static string DescribeIssue(GuideSource source, GuideIssue issue)
     {
         string label = SourceName(source);
         return issue switch
         {
-            GuideIssue.MissingGameId => "该游戏没有有效的月幕档案编号，可打开网站手动搜索。",
+            GuideIssue.MissingGameId => "此游戏缺少月幕档案编号和可用于匹配的名称。",
             GuideIssue.NoResults => $"{label}没有找到攻略。",
             GuideIssue.LayoutChanged => $"暂时无法识别{label}的页面，可在浏览器打开。",
             GuideIssue.ArticleMissing => $"{label}的文章已移除或正文为空，可返回重新查找。",

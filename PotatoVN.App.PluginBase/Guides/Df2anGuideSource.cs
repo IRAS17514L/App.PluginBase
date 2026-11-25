@@ -51,6 +51,23 @@ internal sealed class Df2anGuideSource(GuidePageClient pages, Func<string> getDo
             GuideIssue.NoResults, OnDomain(getDomain(), "/subjects"));
     }
 
+    internal async Task<GuideSiteResults> SearchArticlesAsync(GuideGame names, CancellationToken token)
+    {
+        var subjects = await SearchAsync(names, token);
+        if (subjects.Value is not { } matches) return GuideSiteResults.From(GuideSource.Df2an, subjects);
+
+        var exact = matches.Where(link => GuideSearch.HasExactTitle([link], names)).Take(3).ToArray();
+        if (exact.Length == 0)
+            return new GuideSiteResults(GuideSource.Df2an, [], GuideIssue.NoResults, subjects.BrowserUrl);
+
+        var lists = await Task.WhenAll(exact.Select(subject => GetTopicsAsync(subject.Id, token)));
+        var links = lists.Where(result => result.Value is not null).SelectMany(result => result.Value!).ToArray();
+        if (links.Length > 0)
+            return new GuideSiteResults(GuideSource.Df2an, links, GuideIssue.None, lists[0].BrowserUrl);
+        var failure = lists.FirstOrDefault(result => result.Issue is GuideIssue.Unavailable or GuideIssue.LayoutChanged) ?? lists[0];
+        return GuideSiteResults.From(GuideSource.Df2an, failure);
+    }
+
     internal Task<GuideResult<IReadOnlyList<GuideLink>>> GetTopicsAsync(string subjectId, CancellationToken token) =>
         ReadPageAsync($"/subjects/{subjectId}", GuideIssue.NoResults, ParseTopics, token);
 
@@ -58,19 +75,13 @@ internal sealed class Df2anGuideSource(GuidePageClient pages, Func<string> getDo
         ReadPageAsync($"/topics/{id}", GuideIssue.ArticleMissing,
             (page, url) => GuideHtml.Article(page, ".topic-content", "h1, .topic-title", title, url), token);
 
-    internal void ClearCache()
-    {
-        string currentHost = new Uri(getDomain()).Host;
-        pages.Clear(url => url.Host == currentHost || IsKnownHost(url));
-    }
-
     internal async Task<string?> ProbeAsync(CancellationToken token, string? excludedDomain = null)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
         timeout.CancelAfter(TimeSpan.FromSeconds(8));
         List<Task<string?>> probes = KnownDomains
             .Where(domain => !string.Equals(domain, excludedDomain, StringComparison.OrdinalIgnoreCase))
-            .Select(async domain => await pages.ProbeAsync(OnDomain(domain, "/subjects"), timeout.Token) ? domain : null)
+            .Select(async domain => await pages.ProbeAsync(SubjectsPage(domain), timeout.Token) ? domain : null)
             .ToList();
 
         while (probes.Count > 0)
@@ -131,13 +142,17 @@ internal sealed class Df2anGuideSource(GuidePageClient pages, Func<string> getDo
 
     private static GuideResult<IReadOnlyList<GuideLink>> ParseSubjects(IHtmlDocument page, Uri url)
     {
-        var links = GuideHtml.Links(page, "a[href]", "/subjects/", url, link => link.Host == url.Host || IsKnownHost(link));
+        string selector = page.QuerySelector(".nexus-subjects") is not null
+            ? ".subject-card-title a[href]" : "a[href]";
+        var links = GuideHtml.Links(page, selector, "/subjects/", url, link => link.Host == url.Host || IsKnownHost(link));
         return Results(links, GuideHtml.HasEmptyNotice(page), url);
     }
 
     private static GuideResult<IReadOnlyList<GuideLink>> ParseTopics(IHtmlDocument page, Uri url)
     {
-        var links = GuideHtml.Links(page, "a[href]", "/topics/", url, link => link.Host == url.Host || IsKnownHost(link));
+        string selector = page.QuerySelector(".nexus-right-sidebar") is not null
+            ? ".nexus-right-sidebar a.related-link[href]" : "a[href]";
+        var links = GuideHtml.Links(page, selector, "/topics/", url, link => link.Host == url.Host || IsKnownHost(link));
         bool recognized = GuideHtml.HasEmptyNotice(page) ||
             page.QuerySelector(".subject-info, #subject-info, h1.subject-title") is not null;
         return Results(links, recognized, url);
@@ -151,7 +166,9 @@ internal sealed class Df2anGuideSource(GuidePageClient pages, Func<string> getDo
         error.StatusCode is null or HttpStatusCode.Forbidden or HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests ||
         (int)error.StatusCode.Value >= 500;
 
-    private static bool IsKnownHost(Uri url) => KnownHosts.Contains(url.Host);
+    internal static bool IsKnownHost(Uri url) => KnownHosts.Contains(url.Host);
+
+    internal static Uri SubjectsPage(string domain) => OnDomain(domain, "/subjects");
 
     private static Uri OnDomain(string domain, string path) => new(domain.TrimEnd('/') + path);
 }

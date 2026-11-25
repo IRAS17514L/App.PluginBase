@@ -8,7 +8,7 @@ using System.Threading.Tasks;
 
 namespace PotatoVN.App.PluginBase.Guides;
 
-public enum GuideSource { Df2an = 1, Ymgal = 2, Local = 3 }
+public enum GuideSource { Df2an = 1, Ymgal = 2, Local = 3, Cngal = 4, Seiya = 5, SavedLinks = 6, Steam = 7, Aggregate = 8 }
 
 public readonly record struct GuideReference(GuideSource Source, string Id)
 {
@@ -23,7 +23,7 @@ public sealed record GameGuideHistory(GuideReading? Df2an, GuideReading? Ymgal, 
 {
     internal GuideReading? Get(GuideSource source)
     {
-        GuideReading? reading = source == GuideSource.Df2an ? Df2an : Ymgal;
+        GuideReading? reading = source switch { GuideSource.Df2an => Df2an, GuideSource.Ymgal => Ymgal, _ => null };
         return reading is not null && reading.Article.IsValid && reading.Article.Source == source ? reading : null;
     }
 
@@ -82,7 +82,8 @@ internal sealed record GuideLink(string Id, string Title);
 
 internal sealed record GuideArticle(string Title, string Text);
 
-internal sealed record GuideGame(string? ChineseName, string? OriginalName, string? DisplayName, string? YmgalId)
+internal sealed record GuideGame(string? ChineseName, string? OriginalName, string? DisplayName, string? YmgalId,
+    string? CngalId = null, string? SteamId = null)
 {
     internal IEnumerable<string> SearchNames => new[] { ChineseName, OriginalName, DisplayName }
         .Where(name => !string.IsNullOrWhiteSpace(name))
@@ -118,40 +119,11 @@ internal static class GuideSearch
     {
         "2dfan" => GuideSource.Df2an,
         "ymgal" => GuideSource.Ymgal,
+        "cngal" => GuideSource.Cngal,
+        "seiya" => GuideSource.Seiya,
         "local-first" when hasLocalMount => GuideSource.Local,
         _ => null,
     };
-
-    internal static GuideSource Preferred(GuideSource? setting, GameGuideHistory? history, GuideGame game)
-    {
-        if (setting is { } explicitSource) return explicitSource;
-        if (history?.Get(history.LastSource) is { } reading) return reading.Article.Source;
-        return GuideIds.IsValid(game.YmgalId) ? GuideSource.Ymgal : GuideSource.Df2an;
-    }
-
-    internal static GuideSource Alternate(GuideSource source) =>
-        source == GuideSource.Df2an ? GuideSource.Ymgal : GuideSource.Df2an;
-
-    internal static async Task<(GuideSource Source, GuideResult<IReadOnlyList<GuideLink>> Result,
-        GuideResult<IReadOnlyList<GuideLink>>? Other)> FindAsync(
-        GuideSource source, bool automatic,
-        Func<GuideSource, CancellationToken, Task<GuideResult<IReadOnlyList<GuideLink>>>> search,
-        CancellationToken cancellationToken)
-    {
-        var first = await search(source, cancellationToken);
-        cancellationToken.ThrowIfCancellationRequested();
-        if (first.Value is not null || !automatic) return (source, first, null);
-
-        GuideSource alternate = Alternate(source);
-        var second = await search(alternate, cancellationToken);
-        cancellationToken.ThrowIfCancellationRequested();
-        if (second.Value is not null) return (alternate, second, first);
-
-        // 无编号只是备用来源不可用的原因，保留首选站点更有用的浏览器入口。
-        return second.Issue == GuideIssue.MissingGameId
-            ? (source, first, second)
-            : (alternate, second, first);
-    }
 
     internal static IReadOnlyList<GuideLink> RankTitles(IReadOnlyList<GuideLink> entries, GuideGame game)
     {
@@ -170,7 +142,7 @@ internal static class GuideSearch
         return entries.Any(entry => names.Contains(NormalizeTitle(entry.Title)));
     }
 
-    private static string NormalizeTitle(string title)
+    internal static string NormalizeTitle(string title)
     {
         var normalized = new StringBuilder(title.Length);
         foreach (Rune rune in title.Normalize(NormalizationForm.FormKC).EnumerateRunes())

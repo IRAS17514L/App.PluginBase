@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -9,6 +10,8 @@ using System.Threading;
 using System.Threading.Tasks;
 
 namespace PotatoVN.App.PluginBase.Guides;
+
+internal enum GuideConnection { Unavailable, Partial, Connected }
 
 internal sealed class GuidePageClient(HttpClient? client = null)
 {
@@ -21,15 +24,9 @@ internal sealed class GuidePageClient(HttpClient? client = null)
     private const int MaxCachedPageLength = 1024 * 1024;
     private const int MaxResponseLength = 5 * 1024 * 1024;
 
-    internal void Clear(Func<Uri, bool>? includes = null)
-    {
-        foreach (Uri url in _pages.Keys)
-        {
-            if (includes is null || includes(url)) _pages.TryRemove(url, out _);
-        }
-    }
+    internal void Clear() => _pages.Clear();
 
-    internal async Task<string> GetAsync(Uri url, CancellationToken token)
+    internal async Task<string> GetAsync(Uri url, CancellationToken token, Encoding? fallbackEncoding = null)
     {
         token.ThrowIfCancellationRequested();
         if (_pages.TryGetValue(url, out CachedPage? cached) && cached.ExpiresAt > DateTimeOffset.UtcNow)
@@ -57,7 +54,7 @@ internal sealed class GuidePageClient(HttpClient? client = null)
             }
 
             timeout.Token.ThrowIfCancellationRequested();
-            Encoding encoding = ReadEncoding(response.Content);
+            Encoding encoding = ReadEncoding(response.Content, fallbackEncoding);
             html = encoding.GetString(buffer.GetBuffer(), 0, checked((int)buffer.Length));
         }
         catch (OperationCanceledException error) when (!token.IsCancellationRequested && timeout.IsCancellationRequested)
@@ -76,6 +73,17 @@ internal sealed class GuidePageClient(HttpClient? client = null)
         return html;
     }
 
+    internal async Task<GuideConnection> ProbeEndpointsAsync(IReadOnlyList<Uri> endpoints, CancellationToken token)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+        timeout.CancelAfter(TimeSpan.FromSeconds(8));
+        bool[] results = await Task.WhenAll(endpoints.Select(url => ProbeAsync(url, timeout.Token)));
+        token.ThrowIfCancellationRequested();
+        int reachable = results.Count(result => result);
+        if (reachable == 0) return GuideConnection.Unavailable;
+        return reachable == endpoints.Count ? GuideConnection.Connected : GuideConnection.Partial;
+    }
+
     internal async Task<bool> ProbeAsync(Uri url, CancellationToken token)
     {
         try
@@ -87,16 +95,16 @@ internal sealed class GuidePageClient(HttpClient? client = null)
         catch (OperationCanceledException) { return false; }
     }
 
-    private static Encoding ReadEncoding(HttpContent content)
+    private static Encoding ReadEncoding(HttpContent content, Encoding? fallbackEncoding)
     {
         string? charset = content.Headers.ContentType?.CharSet?.Trim('"');
         if (!string.IsNullOrWhiteSpace(charset))
         {
-            try { return Encoding.GetEncoding(charset); }
+            try { return CodePagesEncodingProvider.Instance.GetEncoding(charset) ?? Encoding.GetEncoding(charset); }
             catch (ArgumentException) { }
             catch (NotSupportedException) { }
         }
-        return Encoding.UTF8;
+        return fallbackEncoding ?? Encoding.UTF8;
     }
 
     private static HttpClient CreateHttpClient()

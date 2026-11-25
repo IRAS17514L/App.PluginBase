@@ -9,8 +9,16 @@ var tests = new (string Name, Func<Task> Run)[]
     ("2DFan tries original title and ranks exact matches", SearchOriginalTitleAsync),
     ("Moon archive and article parsing", ReadMoonAsync),
     ("No results, layout changes, and network errors remain distinct", DistinguishFailuresAsync),
-    ("Automatic fallback and explicit source selection", FallbackAsync),
+    ("Aggregate lookup starts selected sources and isolates failures", AggregateAsync),
+    ("Source connectivity checks report complete and partial availability", GuideConnectionsAsync),
+    ("Aggregate rankings prioritize matching guides and limit repeated sites", () => RunSync(AggregateRanking)),
+    ("2DFan aggregate reads guides from exact search results", Df2anAggregateAsync),
+    ("Moon searches exact game titles without an archive ID", MoonNameAsync),
+    ("Steam public guides are validated against the game's app ID", () => RunSync(SteamPublicGuides)),
     ("Local mount preference is opt-in", () => RunSync(LocalDefaultSelection)),
+    ("CnGal resolves exact game and lists only related guides", CngalAsync),
+    ("Seiya resolves original titles and platform variants from Shift-JIS catalogs", SeiyaAsync),
+    ("Saved web links route supported articles and Steam needs an App ID", () => RunSync(WebLinks)),
     ("Article ID remains usable after mirror change", MirrorAsync),
     ("Legacy links, independent sources, and JSON round trip", () => RunSync(History)),
     ("Paragraph bookmarks survive insertions and find ignores case", () => RunSync(Bookmarks)),
@@ -48,7 +56,7 @@ static async Task ReadMoonAsync()
     using var http = new HttpClient(new Handler(uri =>
         Fixture(uri.AbsolutePath == "/ga77" ? "ymgal-articles.html" : "ymgal-article.html")));
     var source = new YmgalGuideSource(new GuidePageClient(http));
-    var missing = await source.SearchAsync(new GuideGame("夜光故事", null, null, "invalid"), default);
+    var missing = await source.SearchAsync(new GuideGame(null, null, null, "invalid"), default);
     Check(missing.Issue == GuideIssue.MissingGameId, "Invalid archive ID should allow manual browser search.");
     var list = await source.SearchAsync(new GuideGame("夜光故事", null, null, "77"), default);
     Check(list.Value is [{ Id: "65" }], "Expected archive article ID.");
@@ -73,28 +81,186 @@ static async Task DistinguishFailuresAsync()
     Check((await Search("3")).Issue == GuideIssue.NoResults, "Recognized empty page must be shown as no result.");
 }
 
-static async Task FallbackAsync()
+static async Task AggregateAsync()
 {
-    var calls = new List<GuideSource>();
     var address = new Uri("https://example.invalid/");
-    Task<GuideResult<IReadOnlyList<GuideLink>>> Search(GuideSource source, CancellationToken token)
+    var started = new ConcurrentDictionary<GuideSource, byte>();
+    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var lookup = GuideAggregation.SearchAsync(null, includeSteam: true, async (site, token) =>
     {
-        calls.Add(source);
-        return Task.FromResult(source == GuideSource.Ymgal
-            ? GuideResult<IReadOnlyList<GuideLink>>.Failed(GuideIssue.NoResults, address)
-            : GuideResult<IReadOnlyList<GuideLink>>.Found([new("42", "夜光故事")], address));
+        started[site] = 0;
+        await release.Task.WaitAsync(token);
+        if (site == GuideSource.Ymgal) throw new HttpRequestException("test offline");
+        return new GuideSiteResults(site, [new GuideLink(site.ToString(), "夜光故事攻略")], GuideIssue.None, address);
+    }, (_, _) => { }, default);
+    Check(started.Count == 5 && !lookup.IsCompleted, "All enabled sources must start before any finishes.");
+    release.SetResult();
+    var sites = await lookup;
+    Check(sites.Length == 5 && sites.Single(site => site.Source == GuideSource.Ymgal).Issue == GuideIssue.Unavailable &&
+        sites.Where(site => site.Source != GuideSource.Ymgal).All(site => site.Links.Count == 1),
+        "An unavailable source must preserve the other platforms' results.");
+    var withoutSteam = await GuideAggregation.SearchAsync(null, false,
+        (site, _) => Task.FromResult(new GuideSiteResults(site, [], GuideIssue.NoResults, address)), (_, _) => { }, default);
+    Check(withoutSteam.Length == 4 && withoutSteam.All(site => site.Source != GuideSource.Steam), "Steam needs an App ID.");
+
+    GuideSource[] selected = [GuideSource.Cngal, GuideSource.Seiya, GuideSource.Cngal, GuideSource.Local];
+    var custom = await GuideAggregation.SearchAsync(selected, true,
+        (site, _) =>
+        {
+            Check(site is GuideSource.Cngal or GuideSource.Seiya, "An unchecked site must not be queried.");
+            return Task.FromResult(new GuideSiteResults(site, [], GuideIssue.NoResults, address));
+        }, (_, error) => throw new InvalidOperationException("Unexpected source query.", error), default);
+    Check(custom.Select(site => site.Source).SequenceEqual([GuideSource.Cngal, GuideSource.Seiya]),
+        "Use only selected online sites, ignoring duplicates and non-online entries.");
+    var empty = await GuideAggregation.SearchAsync([], true,
+        (_, _) => throw new InvalidOperationException("Expected no online requests."), (_, error) => throw error, default);
+    Check(empty.Length == 0, "An explicitly empty selection stays empty.");
+    Check(GuideAggregation.NormalizeSources(null).SequenceEqual(GuideAggregation.OnlineSources),
+        "A missing selection in older settings keeps all online sources enabled.");
+
+    using var cancel = new CancellationTokenSource();
+    var pending = GuideAggregation.SearchAsync(null, true, async (site, token) =>
+    {
+        await Task.Delay(Timeout.InfiniteTimeSpan, token);
+        return new GuideSiteResults(site, [], GuideIssue.None, address);
+    }, (_, _) => { }, cancel.Token);
+    cancel.Cancel();
+    try
+    {
+        await pending;
+        throw new InvalidOperationException("Expected canceled aggregated search.");
     }
-    var automatic = await GuideSearch.FindAsync(GuideSource.Ymgal, true, Search, default);
-    Check(automatic.Source == GuideSource.Df2an && automatic.Other?.Issue == GuideIssue.NoResults &&
-        calls.SequenceEqual([GuideSource.Ymgal, GuideSource.Df2an]), "Automatic should try the second source on no result.");
-    calls.Clear();
-    var manual = await GuideSearch.FindAsync(GuideSource.Ymgal, false, Search, default);
-    Check(manual.Result.Issue == GuideIssue.NoResults && calls.SequenceEqual([GuideSource.Ymgal]),
-        "Manual source must not silently switch.");
-    var bothFailed = await GuideSearch.FindAsync(GuideSource.Df2an, true, (site, _) => Task.FromResult(
-        GuideResult<IReadOnlyList<GuideLink>>.Failed(site == GuideSource.Df2an
-            ? GuideIssue.Unavailable : GuideIssue.MissingGameId, address)), default);
-    Check(bothFailed.Source == GuideSource.Df2an, "Keep the first browser entry when the secondary archive ID is missing.");
+    catch (OperationCanceledException) when (cancel.IsCancellationRequested) { }
+}
+
+static async Task GuideConnectionsAsync()
+{
+    var down = new Uri("https://example.invalid/down");
+    var up = new Uri("https://example.invalid/up");
+    using var http = new HttpClient(new Handler(uri =>
+        new HttpResponseMessage(uri == up ? HttpStatusCode.OK : HttpStatusCode.ServiceUnavailable)));
+    var pages = new GuidePageClient(http);
+    Check(await pages.ProbeEndpointsAsync([up], default) == GuideConnection.Connected,
+        "A working site should be reported as reachable.");
+    Check(await pages.ProbeEndpointsAsync([up, down], default) == GuideConnection.Partial,
+        "A site with two endpoints can be partly reachable.");
+    Check(await pages.ProbeEndpointsAsync([down], default) == GuideConnection.Unavailable,
+        "Failed endpoints should be reported as unavailable.");
+    using var cancel = new CancellationTokenSource();
+    cancel.Cancel();
+    try
+    {
+        await pages.ProbeEndpointsAsync([up], cancel.Token);
+        throw new InvalidOperationException("Expected canceled connectivity check.");
+    }
+    catch (OperationCanceledException) when (cancel.IsCancellationRequested) { }
+}
+
+static void AggregateRanking()
+{
+    var address = new Uri("https://example.invalid/");
+    var ranked = GuideAggregation.Rank(new("夜光故事", "Yakou Story", "夜光故事", null, SteamId: "324160"),
+    [
+        new(GuideSource.Df2an, [
+            new("intro", "夜光故事评测"),
+            new("route", "第三章"),
+            new("guide", "夜光故事全路线攻略"),
+            new("guide", "重复链接"),
+            new("guide2", "夜光故事全结局"),
+            new("guide3", "夜光故事全成就"),
+            new("guide4", "夜光故事全流程攻略"),
+        ], GuideIssue.None, address),
+        new(GuideSource.Seiya, [new("console", "Yakou Story Switch版"), new("jp", "Yakou Story Steam版")], GuideIssue.None, address),
+        new(GuideSource.Steam, [new("patch", "Yakou Story translation patch"), new("steam", "Yakou Story Achievement Guide")],
+            GuideIssue.None, address),
+    ]);
+    Check(ranked.Take(3).Select(result => result.Link.Id).SequenceEqual(["guide", "jp", "steam"]),
+        "Match game titles and guide intent and use better per-site results to break ties.");
+    Check(ranked.Count(result => result.Link.Id == "guide") == 1 &&
+        ranked.All(result => result.Link.Id is not ("intro" or "patch")) &&
+        ranked[^1].Link.Id == "route", "Deduplicate entries and exclude reviews and patches.");
+    Check(ranked.Single(guide => guide.Link.Id == "console").Score < ranked.Single(guide => guide.Link.Id == "jp").Score,
+        "Show a more relevant edition first when a Steam App ID is known.");
+    var best = GuideAggregation.BestMatches(ranked);
+    Check(best.Count(item => item.Source == GuideSource.Df2an) == 3 && best.Any(item => item.Source == GuideSource.Steam),
+        "The short list has a per-site cap and retains other platforms.");
+}
+
+static async Task Df2anAggregateAsync()
+{
+    using var http = new HttpClient(new Handler(uri => uri.AbsolutePath switch
+    {
+        "/subjects/search" => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("""
+                <div class="nexus-subjects">
+                  <h3 class="subject-card-title"><a href="/subjects/42">夜光故事</a></h3>
+                  <h3 class="subject-card-title"><a href="/subjects/43">夜光故事外传</a></h3>
+                  <aside><a href="/subjects/1">夜光故事</a></aside>
+                </div>
+                """),
+        },
+        "/subjects/42" => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("""
+                <h1 class="subject-title">夜光故事</h1>
+                <a href="/topics/91">继续阅读</a>
+                <aside class="nexus-right-sidebar">
+                  <a class="related-link" href="/topics/92">全结局攻略</a>
+                </aside>
+                """),
+        },
+        _ => throw new InvalidOperationException("Must only open the exact game in the search area."),
+    }));
+    var source = new Df2anGuideSource(new GuidePageClient(http), () => Df2anGuideSource.DefaultDomain, _ => { });
+    var result = await source.SearchArticlesAsync(new("夜光故事", null, null, null), default);
+    Check(result.Links is [{ Id: "92" }], "Use verified games' actual guides, excluding the site introduction.");
+}
+
+static async Task MoonNameAsync()
+{
+    using var http = new HttpClient(new Handler(uri => uri.AbsolutePath switch
+    {
+        "/search" => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("""
+                <div id="yms-search-result">
+                  <a class="game-view-card" href="/ga78"><h3>夜光故事 外传</h3></a>
+                  <a class="game-view-card" href="https://elsewhere.invalid/ga77"><h3>夜光故事</h3></a>
+                  <a class="game-view-card" href="/ga77"><h3>Yakou Story</h3><div class="subtitle">夜光故事</div></a>
+                </div>
+                """),
+        },
+        "/ga77" => Fixture("ymgal-articles.html"),
+        _ => throw new InvalidOperationException("Expected one exact game archive."),
+    }));
+    var source = new YmgalGuideSource(new GuidePageClient(http));
+    var result = await source.SearchAsync(new GuideGame("夜光故事", null, null, null), default);
+    Check(result.Value is [{ Id: "65" }], "Search game titles when there is no archive ID and open the exact archive.");
+}
+
+static void SteamPublicGuides()
+{
+    var address = GuideWebLinks.SteamGuides("324160")!;
+    const string html = """
+        <div class="guides_home_list_ctn">
+          <a class="workshopItemCollection" data-appid="324160" data-publishedfileid="42"
+             href="/sharedfiles/filedetails/?id=42">
+             <div class="workshopItemApp guide"></div><div class="workshopItemTitle">CLANNAD Walkthrough</div>
+          </a>
+          <a class="workshopItemCollection" data-appid="23800" data-publishedfileid="3" href="/sharedfiles/filedetails/?id=3">
+             <div class="workshopItemApp guide"></div><div class="workshopItemTitle">Another game's guide</div>
+          </a>
+          <a class="workshopItemCollection" data-appid="324160" data-publishedfileid="5" href="/sharedfiles/filedetails/?id=5">
+             <div class="workshopItemTitle">Non-guide Steam item</div>
+          </a>
+        </div>
+        """;
+    Check(SteamGuideSource.Parse(html, address).Links is
+        [{ Id: "https://steamcommunity.com/sharedfiles/filedetails/?id=42", Title: "CLANNAD Walkthrough" }],
+        "Extract the requested game's public guide cards only.");
+    Check(SteamGuideSource.Parse("<div class='guideInfo'></div>", address).Issue == GuideIssue.NoResults,
+        "A recognized Steam guide page can have zero guides.");
 }
 
 static void LocalDefaultSelection()
@@ -104,6 +270,104 @@ static void LocalDefaultSelection()
     Check(GuideSearch.InitialSource("local-first", false) is null, "Local-first should use online automatic if nothing is mounted.");
     Check(GuideSearch.InitialSource("2dfan", true) == GuideSource.Df2an &&
         GuideSearch.InitialSource("ymgal", true) == GuideSource.Ymgal, "An explicit online source must be preserved.");
+}
+
+static async Task CngalAsync()
+{
+    var calls = new List<string>();
+    using var http = new HttpClient(new Handler(uri =>
+    {
+        calls.Add(uri.AbsolutePath);
+        return uri.AbsolutePath switch
+        {
+            "/api/home/Search" => JsonResponse("""
+                {"pagedResultDto":{"data":[{"entry":{"id":6,"name":"海沙风云 外传"}},{"entry":{"id":79,"name":"海沙风云"}}]}}
+                """),
+            "/api/entries/GetEntryView/79" => JsonResponse("""
+                {"type":"Game","articleRelevances":[
+                  {"id":418,"type":"Tought","name":"《海沙风云》全结局攻略"},
+                  {"id":493,"type":"Evaluation","name":"《海沙风云》评测"},
+                  {"id":88,"type":"Strategy","name":"路线说明"},
+                  {"id":418,"type":"Strategy","name":"重复链接"}]}
+                """),
+            _ => new HttpResponseMessage(HttpStatusCode.NotFound),
+        };
+    }));
+    var site = new CngalGuideSource(new GuidePageClient(http));
+    var result = await site.SearchAsync(new GuideGame("海沙风云", null, null, null), default);
+    Check(calls.SequenceEqual(["/api/home/Search", "/api/entries/GetEntryView/79"]), "CnGal must prefer an exact game name.");
+    Check(result.Links.Select(link => link.Id).SequenceEqual(
+        ["https://www.cngal.org/articles/index/418", "https://www.cngal.org/articles/index/88"]),
+        "Keep strategy articles and guide-titled articles, excluding reviews and duplicates.");
+    var knownCalls = new List<string>();
+    using var directHttp = new HttpClient(new Handler(uri =>
+    {
+        knownCalls.Add(uri.AbsolutePath);
+        return JsonResponse("""{"type":"Game","articleRelevances":[]}""");
+    }));
+    var direct = new CngalGuideSource(new GuidePageClient(directHttp));
+    var empty = await direct.SearchAsync(new GuideGame("海沙风云", null, null, null, "79"), default);
+    Check(empty.Issue == GuideIssue.NoResults && knownCalls.SequenceEqual(["/api/entries/GetEntryView/79"]),
+        "A stored CnGal ID should bypass name search.");
+    using var ambiguousHttp = new HttpClient(new Handler(uri => uri.AbsolutePath == "/api/home/Search"
+        ? JsonResponse("""{"pagedResultDto":{"data":[{"entry":{"id":79,"name":"海沙风云"}},{"entry":{"id":8,"name":"海沙风云"}}]}}""")
+        : throw new InvalidOperationException("Ambiguous name must not select a game.")));
+    var ambiguous = new CngalGuideSource(new GuidePageClient(ambiguousHttp));
+    Check((await ambiguous.SearchAsync(new GuideGame("海沙风云", null, null, null), default)).Issue == GuideIssue.NoResults,
+        "Ambiguous site matches must not produce an unrelated guide.");
+}
+
+static HttpResponseMessage JsonResponse(string json) =>
+    new(HttpStatusCode.OK) { Content = new StringContent(json, Encoding.UTF8, "application/json") };
+
+static async Task SeiyaAsync()
+{
+    const string main = """
+        <a href="key/game.html">ゲーム：攻略</a>
+        <a href="key/game.html#start">ゲーム</a>
+        <a href="key/sequel.html">ゲーム2</a>
+        <a href="https://unrelated.invalid/game/false.html">ゲーム</a>
+        <a href="../save/game.zip">ゲーム</a>
+        """;
+    const string allAges = """
+        <a href="galge/switch/game_switch.html">ゲーム Switch版 PS4版</a>
+        <a href="galge/switch/game_after.html">ゲーム AFTER Switch版</a>
+        """;
+    using var http = new HttpClient(new Handler(uri => new HttpResponseMessage(HttpStatusCode.OK)
+    {
+        Content = new ByteArrayContent(CodePagesEncodingProvider.Instance.GetEncoding(932)!
+            .GetBytes(uri.Host == "galge.seiya-saiga.com" ? allAges : main)),
+    }));
+    var source = new SeiyaGuideSource(new GuidePageClient(http));
+    var result = await source.SearchAsync(new GuideGame("汉化名", "ゲーム", "汉化名", null), default);
+    Check(result.Links.Select(link => link.Title).SequenceEqual(["ゲーム", "ゲーム Switch版 PS4版"]),
+        "Decode Shift-JIS and keep exact title and platform variants, excluding sequels.");
+    Check(result.Links.Select(link => link.Id).SequenceEqual(
+        ["https://seiya-saiga.com/game/key/game.html", "https://galge.seiya-saiga.com/game/galge/switch/game_switch.html"]),
+        "Resolve relative URLs and deduplicate by canonical guide link.");
+}
+
+static void WebLinks()
+{
+    Check(GuideWebLinks.TryParse(" https://2dfdf.de/topics/0012#route ", out Uri mirror) &&
+        GuideWebLinks.ReaderReference(mirror) == new GuideReference(GuideSource.Df2an, "12"),
+        "A known 2DFan mirror link opens the in-app reader.");
+    Check(GuideWebLinks.TryParse("https://www.ymgal.games/co/article/56", out Uri moon) &&
+        GuideWebLinks.ReaderReference(moon) == new GuideReference(GuideSource.Ymgal, "56"),
+        "A Moon article link opens the in-app reader.");
+    Check(GuideWebLinks.TryParse("https://2dfan.com.example/topics/12", out Uri other) &&
+        GuideWebLinks.ReaderReference(other) is null &&
+        !GuideWebLinks.TryParse("https://example.com@www.ymgal.games/co/article/56", out _) &&
+        !GuideWebLinks.TryParse("file:///C:/file.txt", out _) &&
+        !GuideWebLinks.TryParse("javascript:alert(1)", out _),
+        "Only supported article hosts route to parsers and browser links must be plain HTTP(S).");
+    Check(GuideWebLinks.SteamGuides("4262610")?.AbsoluteUri ==
+        "https://steamcommunity.com/app/4262610/guides/?l=schinese" &&
+        GuideWebLinks.SteamGuides("0") is null && GuideWebLinks.SteamGuides("1/guides") is null,
+        "Only a valid app ID generates a Steam guide link.");
+    var saved = new SavedGuideLink(Guid.NewGuid(), mirror.AbsoluteUri, "全路线", new GuideBookmark("route", 4, 0.2));
+    Check(JsonSerializer.Deserialize<SavedGuideLink[]>(JsonSerializer.Serialize(new[] { saved })) is [var restored] &&
+        restored == saved, "Saved links retain title, URL, ID and reading progress.");
 }
 
 static async Task MirrorAsync()
@@ -143,7 +407,7 @@ static void History()
     var roundTrip = JsonSerializer.Deserialize<ConcurrentDictionary<Guid, GameGuideHistory>>(JsonSerializer.Serialize(saved));
     Check(roundTrip?[game].Ymgal?.Bookmark == position && roundTrip[game].Df2an?.Article.Id == "42",
         "Both sources should survive serialization.");
-    Check(GuideSearch.Preferred(null, saved[game], new GuideGame(null, null, null, null)) == GuideSource.Ymgal,
+    Check(saved[game].LastSource == GuideSource.Ymgal,
         "Auto should resume the last successfully opened article.");
     GuideHistory.Remember(saved, game, moon with { Article = moon.Article with { Id = "70" } });
     Check(!GuideHistory.RememberPosition(saved, game, moon.Article, position), "An old reader must not update a newer article.");
