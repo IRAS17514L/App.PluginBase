@@ -16,6 +16,9 @@ public partial class Plugin
     {
         var controls = new StackPanel { Spacing = 4 };
         var statusBySource = new Dictionary<GuideSource, TextBlock>();
+        var switchDomain = CreateGuideButton("切换到备用域名", "使用本次检测到的 2DFan 备用域名");
+        switchDomain.Visibility = Visibility.Collapsed;
+        (string Current, string Backup)? offeredDomain = null;
         foreach (GuideSource source in GuideAggregation.OnlineSources)
         {
             var toggle = new CheckBox
@@ -47,15 +50,38 @@ public partial class Plugin
             row.Children.Add(status);
             controls.Children.Add(row);
             statusBySource.Add(source, status);
+            if (source == GuideSource.Df2an)
+                controls.Children.Add(switchDomain);
         }
 
-        domainBox.SelectionChanged += (_, _) => statusBySource[GuideSource.Df2an].Text = "";
+        void ClearDomainOffer()
+        {
+            offeredDomain = null;
+            switchDomain.Visibility = Visibility.Collapsed;
+        }
+
+        domainBox.SelectionChanged += (_, _) =>
+        {
+            ClearDomainOffer();
+            statusBySource[GuideSource.Df2an].Text = "";
+        };
+        switchDomain.Click += (_, _) =>
+        {
+            if (offeredDomain is { } offer && offer.Current == Data.Domain)
+            {
+                domainBox.SelectedItem = offer.Backup;
+                statusBySource[GuideSource.Df2an].Text = "已切换";
+            }
+            ClearDomainOffer();
+        };
         var detect = CreateGuideButton("检测各站连接", "通过当前网络检查每个站点的连接");
         controls.Children.Add(detect);
         detect.Click += async (_, _) =>
         {
             detect.IsEnabled = false;
             string domain = Data.Domain;
+            domainBox.SelectedItem = domain;
+            ClearDomainOffer();
             var token = _lifetimeCts.Token;
             try
             {
@@ -63,8 +89,29 @@ public partial class Plugin
                 {
                     var (source, status) = entry;
                     status.Text = "检测中…";
-                    var result = await _guidePages.ProbeEndpointsAsync(ConnectionEndpoints(source, domain), token);
-                    if (source == GuideSource.Df2an && domain != Data.Domain) return;
+                    if (source == GuideSource.Df2an)
+                    {
+                        var (currentReachable, backup) = await _df2an.CheckConfiguredDomainAsync(domain, token);
+                        if (domain != Data.Domain)
+                        {
+                            domainBox.SelectedItem = Data.Domain;
+                            status.Text = "域名已变更";
+                            return;
+                        }
+
+                        status.Text = currentReachable ? "可连接" : backup is null ? "连接失败" : "当前域名不可用";
+                        if (backup is not null)
+                        {
+                            offeredDomain = (domain, backup);
+                            string label = $"切换到 {new Uri(backup).Host}";
+                            switchDomain.Content = label;
+                            DescribeGuideControl(switchDomain, label, $"使用本次检测到的备用域名 {backup}");
+                            switchDomain.Visibility = Visibility.Visible;
+                        }
+                        return;
+                    }
+
+                    var result = await _guidePages.ProbeEndpointsAsync(ConnectionEndpoints(source), token);
                     status.Text = result switch
                     {
                         GuideConnection.Connected => "可连接",
@@ -89,12 +136,11 @@ public partial class Plugin
             "可多选。只在已勾选的网站搜寻攻略。Steam 需要游戏已有 App ID。", controls);
     }
 
-    private static Uri[] ConnectionEndpoints(GuideSource source, string domain) => source switch
+    private static Uri[] ConnectionEndpoints(GuideSource source) => source switch
     {
-        GuideSource.Df2an => [Df2anGuideSource.SubjectsPage(domain)],
         GuideSource.Ymgal => [YmgalGuideSource.BaseUrl],
         GuideSource.Cngal => [CngalGuideSource.ConnectionCheck, CngalGuideSource.Site],
-        GuideSource.Seiya => [SeiyaGuideSource.Main, SeiyaGuideSource.AllAges],
+        GuideSource.Seiya => [SeiyaGuideSource.Main, SeiyaGuideSource.AllAgesPc, SeiyaGuideSource.AllAges],
         GuideSource.Steam => [GuideWebLinks.SteamGuides("324160")!],
         _ => throw new ArgumentOutOfRangeException(nameof(source)),
     };

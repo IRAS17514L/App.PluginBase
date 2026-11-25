@@ -64,7 +64,11 @@ public partial class Plugin
         };
         state = panel;
 
-        Grid root = new() { RowSpacing = 2 };
+        Grid root = new()
+        {
+            RowSpacing = 2,
+            KeyboardAcceleratorPlacementMode = KeyboardAcceleratorPlacementMode.Hidden,
+        };
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
@@ -108,9 +112,6 @@ public partial class Plugin
             return ShowAggregatedGuidesAsync(game, names, state);
 
         state.CurrentSource = source;
-        if (source is GuideSource.Cngal or GuideSource.Seiya)
-            return ShowWebSourceAsync(game, names, state, source);
-
         Data.ReadingHistory.TryGetValue(game.Uuid, out GameGuideHistory? history);
         if (history?.Get(source) is not { } reading)
             return SearchSingleSiteAsync(game, names, source, state);
@@ -141,8 +142,10 @@ public partial class Plugin
     }
 
     private Task SearchSingleSiteAsync(Galgame game, GuideGame names, GuideSource source, PanelState state) =>
-        RunPanelLoadAsync(state, $"正在查找{SourceName(source)}攻略…",
-            token => FindCandidatesAsync(game, names, source, state, token));
+        source is GuideSource.Cngal or GuideSource.Seiya or GuideSource.Steam
+            ? ShowWebSourceAsync(game, names, state, source)
+            : RunPanelLoadAsync(state, $"正在查找{SourceName(source)}攻略…",
+                token => FindCandidatesAsync(game, names, source, state, token));
 
     private async Task FindCandidatesAsync(Galgame game, GuideGame names, GuideSource source, PanelState state,
         CancellationToken token)
@@ -236,7 +239,7 @@ public partial class Plugin
             Data.ReadingHistory.TryGetValue(game.Uuid, out GameGuideHistory? history);
             GuideReading? previous = history?.Get(reference.Source);
             GuideBookmark? bookmark = previous?.Article == reference ? previous.Bookmark : null;
-            PresentArticle(state, article.Text, bookmark, position =>
+            PresentOnlineArticle(state, article, result.BrowserUrl, bookmark, position =>
             {
                 if (GuideHistory.RememberPosition(Data.ReadingHistory, game.Uuid, reference, position))
                     SaveData();
@@ -248,9 +251,24 @@ public partial class Plugin
     }
 
     private Task<GuideResult<GuideArticle>> ReadOnlineArticleAsync(GuideReference reference, string title,
-        CancellationToken token) => reference.Source == GuideSource.Df2an
-            ? _df2an.ReadArticleAsync(reference.Id, title, token)
-            : _ymgal.ReadArticleAsync(reference.Id, title, token);
+        CancellationToken token) => reference.Source switch
+        {
+            GuideSource.Df2an => _df2an.ReadArticleAsync(reference.Id, title, token),
+            GuideSource.Ymgal => _ymgal.ReadArticleAsync(reference.Id, title, token),
+            GuideSource.Cngal => _cngal.ReadArticleAsync(reference.Id, title, token),
+            GuideSource.Seiya => _seiya.ReadArticleAsync(reference.Id, title, token),
+            GuideSource.Steam => _steam.ReadArticleAsync(reference.Id, title, token),
+            _ => throw new ArgumentOutOfRangeException(nameof(reference)),
+        };
+
+    private static void PresentOnlineArticle(PanelState state, GuideArticle article, Uri? original,
+        GuideBookmark? bookmark, Action<GuideBookmark> remember)
+    {
+        PresentArticle(state, article.Text, bookmark, remember);
+        if (article.HasVisualContent && original is not null)
+            AddResultRow(state.Content, 0, "在浏览器查看原图与完整排版",
+                () => OpenGuideInBrowserAsync(original.AbsoluteUri));
+    }
 
     private static void PresentArticle(PanelState state, string text, GuideBookmark? bookmark, Action<GuideBookmark> remember)
     {
@@ -381,7 +399,9 @@ public partial class Plugin
         string label = SourceName(source);
         return issue switch
         {
+            GuideIssue.MissingGameId when source == GuideSource.Steam => "此游戏缺少 Steam App ID。",
             GuideIssue.MissingGameId => "此游戏缺少月幕档案编号和可用于匹配的名称。",
+            GuideIssue.BrowserOnly => "这篇攻略需要查看图片或视频，请在浏览器打开原文。",
             GuideIssue.NoResults => $"{label}没有找到攻略。",
             GuideIssue.LayoutChanged => $"暂时无法识别{label}的页面，可在浏览器打开。",
             GuideIssue.ArticleMissing => $"{label}的文章已移除或正文为空，可返回重新查找。",

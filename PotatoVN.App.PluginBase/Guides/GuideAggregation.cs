@@ -38,7 +38,8 @@ internal static class GuideAggregation
     ];
 
     private static readonly string[] ConsoleVersions =
-        ["Switch版", "Switch2版", "Switch 2版", "PS3版", "PS4版", "PS5版", "PSP版", "Vita版"];
+        ["Switch版", "Switch2版", "Switch 2版", "PS2版", "PS3版", "PS4版", "PS5版", "PSP版", "Vita版",
+         "Xbox One版", "Xbox360版", "Xbox Series"];
 
     internal static Task<GuideSiteResults[]> SearchAsync(IEnumerable<GuideSource>? selected, bool includeSteam,
         Func<GuideSource, CancellationToken, Task<GuideSiteResults>> search, Action<GuideSource, Exception> logError,

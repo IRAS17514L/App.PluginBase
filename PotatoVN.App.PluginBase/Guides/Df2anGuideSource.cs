@@ -75,12 +75,20 @@ internal sealed class Df2anGuideSource(GuidePageClient pages, Func<string> getDo
         ReadPageAsync($"/topics/{id}", GuideIssue.ArticleMissing,
             (page, url) => GuideHtml.Article(page, ".topic-content", "h1, .topic-title", title, url), token);
 
-    internal async Task<string?> ProbeAsync(CancellationToken token, string? excludedDomain = null)
+    internal async Task<(bool CurrentReachable, string? BackupDomain)> CheckConfiguredDomainAsync(
+        string domain, CancellationToken token)
+    {
+        var connection = await pages.ProbeEndpointsAsync([SubjectsPage(domain)], token);
+        if (connection == GuideConnection.Connected) return (true, null);
+        return (false, await ProbeAsync(token, domain));
+    }
+
+    private async Task<string?> ProbeAsync(CancellationToken token, string excludedDomain)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
         timeout.CancelAfter(TimeSpan.FromSeconds(8));
         List<Task<string?>> probes = KnownDomains
-            .Where(domain => !string.Equals(domain, excludedDomain, StringComparison.OrdinalIgnoreCase))
+            .Where(domain => !string.Equals(domain, excludedDomain.TrimEnd('/'), StringComparison.OrdinalIgnoreCase))
             .Select(async domain => await pages.ProbeAsync(SubjectsPage(domain), timeout.Token) ? domain : null)
             .ToList();
 
@@ -168,7 +176,7 @@ internal sealed class Df2anGuideSource(GuidePageClient pages, Func<string> getDo
 
     internal static bool IsKnownHost(Uri url) => KnownHosts.Contains(url.Host);
 
-    internal static Uri SubjectsPage(string domain) => OnDomain(domain, "/subjects");
+    private static Uri SubjectsPage(string domain) => OnDomain(domain, "/subjects");
 
     private static Uri OnDomain(string domain, string path) => new(domain.TrimEnd('/') + path);
 }

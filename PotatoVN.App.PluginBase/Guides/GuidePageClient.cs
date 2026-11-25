@@ -6,6 +6,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -16,6 +17,8 @@ internal enum GuideConnection { Unavailable, Partial, Connected }
 internal sealed class GuidePageClient(HttpClient? client = null)
 {
     private static readonly HttpClient DefaultHttp = CreateHttpClient();
+    private static readonly Regex MetaCharset = new(@"<meta\b[^>]*\bcharset\s*=\s*[""']?\s*(?<name>[\w-]+)",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
     private readonly HttpClient _http = client ?? DefaultHttp;
     private readonly ConcurrentDictionary<Uri, CachedPage> _pages = new();
 
@@ -54,8 +57,10 @@ internal sealed class GuidePageClient(HttpClient? client = null)
             }
 
             timeout.Token.ThrowIfCancellationRequested();
-            Encoding encoding = ReadEncoding(response.Content, fallbackEncoding);
-            html = encoding.GetString(buffer.GetBuffer(), 0, checked((int)buffer.Length));
+            var payload = buffer.GetBuffer();
+            int length = checked((int)buffer.Length);
+            Encoding encoding = ReadEncoding(response.Content, payload, length, fallbackEncoding);
+            html = encoding.GetString(payload, 0, length);
         }
         catch (OperationCanceledException error) when (!token.IsCancellationRequested && timeout.IsCancellationRequested)
         {
@@ -95,9 +100,14 @@ internal sealed class GuidePageClient(HttpClient? client = null)
         catch (OperationCanceledException) { return false; }
     }
 
-    private static Encoding ReadEncoding(HttpContent content, Encoding? fallbackEncoding)
+    private static Encoding ReadEncoding(HttpContent content, byte[] payload, int length, Encoding? fallbackEncoding)
     {
         string? charset = content.Headers.ContentType?.CharSet?.Trim('"');
+        if (string.IsNullOrWhiteSpace(charset) && fallbackEncoding is not null)
+        {
+            string prefix = Encoding.ASCII.GetString(payload, 0, Math.Min(4096, length));
+            charset = MetaCharset.Match(prefix).Groups["name"].Value;
+        }
         if (!string.IsNullOrWhiteSpace(charset))
         {
             try { return CodePagesEncodingProvider.Instance.GetEncoding(charset) ?? Encoding.GetEncoding(charset); }

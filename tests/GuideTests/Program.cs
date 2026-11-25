@@ -11,6 +11,11 @@ var tests = new (string Name, Func<Task> Run)[]
     ("No results, layout changes, and network errors remain distinct", DistinguishFailuresAsync),
     ("Aggregate lookup starts selected sources and isolates failures", AggregateAsync),
     ("Source connectivity checks report complete and partial availability", GuideConnectionsAsync),
+    ("2DFan connection check only offers a backup when the configured domain fails", Df2anDomainCheckAsync),
+    ("CnGal extracts public HTML and keeps a fallback for image-only guides", CngalArticleAsync),
+    ("Steam reads ordered guide sections without comments", () => RunSync(SteamArticle)),
+    ("Seiya reads route columns, old redirects and both encodings", SeiyaArticleAsync),
+    ("Reading history is backward compatible across all five sites", () => RunSync(ExtendedHistory)),
     ("Aggregate rankings prioritize matching guides and limit repeated sites", () => RunSync(AggregateRanking)),
     ("2DFan aggregate reads guides from exact search results", Df2anAggregateAsync),
     ("Moon searches exact game titles without an archive ID", MoonNameAsync),
@@ -18,6 +23,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Local mount preference is opt-in", () => RunSync(LocalDefaultSelection)),
     ("CnGal resolves exact game and lists only related guides", CngalAsync),
     ("Seiya resolves original titles and platform variants from Shift-JIS catalogs", SeiyaAsync),
+    ("Seiya covers all-ages PC and kana-annotated console titles", SeiyaPlatformTitlesAsync),
     ("Saved web links route supported articles and Steam needs an App ID", () => RunSync(WebLinks)),
     ("Article ID remains usable after mirror change", MirrorAsync),
     ("Legacy links, independent sources, and JSON round trip", () => RunSync(History)),
@@ -154,6 +160,31 @@ static async Task GuideConnectionsAsync()
         throw new InvalidOperationException("Expected canceled connectivity check.");
     }
     catch (OperationCanceledException) when (cancel.IsCancellationRequested) { }
+}
+
+static async Task Df2anDomainCheckAsync()
+{
+    const string backup = "https://2dfdf.de";
+    string current = Df2anGuideSource.DefaultDomain + "/";
+    bool activeReachable = true;
+    var requested = new ConcurrentBag<Uri>();
+    var savedDomains = new List<string>();
+    using var http = new HttpClient(new Handler(uri =>
+    {
+        requested.Add(uri);
+        bool reachable = uri.Host == "2dfdf.de" || (activeReachable && uri.Host == "2dfan.com");
+        return new HttpResponseMessage(reachable ? HttpStatusCode.OK : HttpStatusCode.ServiceUnavailable);
+    }));
+    var source = new Df2anGuideSource(new GuidePageClient(http), () => current, savedDomains.Add);
+    var healthy = await source.CheckConfiguredDomainAsync(current, default);
+    Check(healthy is (true, null) && requested.Count == 1, "A healthy domain requires no backup probes.");
+
+    activeReachable = false;
+    requested.Clear();
+    var unhealthy = await source.CheckConfiguredDomainAsync(current, default);
+    Check(unhealthy is (false, backup) && requested.Count(uri => uri.Host == "2dfan.com") == 1,
+        "An unreachable domain offers a working backup without rechecking the configured domain.");
+    Check(savedDomains.Count == 0, "Connectivity checks must leave switching the domain to the player.");
 }
 
 static void AggregateRanking()
@@ -333,10 +364,18 @@ static async Task SeiyaAsync()
         <a href="galge/switch/game_switch.html">ゲーム Switch版 PS4版</a>
         <a href="galge/switch/game_after.html">ゲーム AFTER Switch版</a>
         """;
-    using var http = new HttpClient(new Handler(uri => new HttpResponseMessage(HttpStatusCode.OK)
+    using var http = new HttpClient(new Handler(uri =>
     {
-        Content = new ByteArrayContent(CodePagesEncodingProvider.Instance.GetEncoding(932)!
-            .GetBytes(uri.Host == "galge.seiya-saiga.com" ? allAges : main)),
+        string html = uri switch
+        {
+            _ when uri == SeiyaGuideSource.Main => main,
+            _ when uri == SeiyaGuideSource.AllAges => allAges,
+            _ => """<a href="key/other.html">別のゲーム</a>""",
+        };
+        return new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(CodePagesEncodingProvider.Instance.GetEncoding(932)!.GetBytes(html)),
+        };
     }));
     var source = new SeiyaGuideSource(new GuidePageClient(http));
     var result = await source.SearchAsync(new GuideGame("汉化名", "ゲーム", "汉化名", null), default);
@@ -345,6 +384,158 @@ static async Task SeiyaAsync()
     Check(result.Links.Select(link => link.Id).SequenceEqual(
         ["https://seiya-saiga.com/game/key/game.html", "https://galge.seiya-saiga.com/game/galge/switch/game_switch.html"]),
         "Resolve relative URLs and deduplicate by canonical guide link.");
+}
+
+static async Task SeiyaPlatformTitlesAsync()
+{
+    var addresses = new ConcurrentBag<Uri>();
+    using var http = new HttpClient(new Handler(uri =>
+    {
+        addresses.Add(uri);
+        string html = uri == SeiyaGuideSource.AllAgesPc
+            ? """<a href="5pb/child.html">CHAOS;CHILD for Windows PC</a>"""
+            : uri == SeiyaGuideSource.AllAges
+                ? """
+                    <a href="galge/xbox/child.html">CHAOS;CHILD（カオスチャイルド）Xbox one版</a>
+                    <a href="galge/switch/child.html">CHAOS;CHILD（カオスチャイルド）Switch版</a>
+                    <a href="galge/switch/spinoff.html">CHAOS;CHILD らぶchu☆chu!!　Switch版</a>
+                    """
+                : """<a href="5pb/unrelated.html">其他游戏</a>""";
+        return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(html, Encoding.UTF8) };
+    }));
+    var site = new SeiyaGuideSource(new GuidePageClient(http));
+    var result = await site.SearchAsync(new("混沌之子", "CHAOS;CHILD", null, null, SteamId: "970570"), default);
+    Check(addresses.Contains(SeiyaGuideSource.AllAgesPc) && addresses.Count == 3,
+        "Search all official catalogs including the all-ages PC index.");
+    Check(result.Links.Select(item => item.Id).SequenceEqual(
+        ["https://galge.seiya-saiga.com/game/5pb/child.html",
+         "https://galge.seiya-saiga.com/game/galge/xbox/child.html",
+         "https://galge.seiya-saiga.com/game/galge/switch/child.html"]),
+        "Match the Windows and annotated console editions while excluding the spin-off.");
+    var withJapaneseReading = await site.SearchAsync(new("混沌之子", "カオスチャイルド", null, null), default);
+    Check(withJapaneseReading.Links.Count == 2, "Match a catalog entry using its kana reading.");
+}
+
+static async Task CngalArticleAsync()
+{
+    using var http = new HttpClient(new Handler(uri => uri.AbsolutePath switch
+    {
+        "/api/articles/GetArticleView/418" => JsonResponse("""
+            {"displayName":"路线指南","mainPage":"<h2>共同线</h2><p>在此处存档。</p><script>无关内容</script><img src='/map.jpg'>"}
+            """),
+        "/api/articles/GetArticleView/419" => JsonResponse("""
+            {"displayName":"图示","mainPage":"<img src='/flow.png'>"}
+            """),
+        _ => new HttpResponseMessage(HttpStatusCode.NotFound),
+    }));
+    var source = new CngalGuideSource(new GuidePageClient(http));
+    var result = await source.ReadArticleAsync("418", "回退标题", default);
+    Check(result.Value is { Title: "路线指南", Text: "共同线\n在此处存档。", HasVisualContent: true } &&
+        result.BrowserUrl?.AbsolutePath == "/articles/index/418", "Read CnGal public article HTML and keep its original URL.");
+    Check((await source.ReadArticleAsync("419", "图示", default)).Issue == GuideIssue.BrowserOnly,
+        "Image-only articles should use the original page.");
+}
+
+static void SteamArticle()
+{
+    var url = new Uri("https://steamcommunity.com/sharedfiles/filedetails/?id=42");
+    const string html = """
+        <div class="workshopItemTitle">路线指南</div>
+        <div class="guide subSections">
+            <div class="subSection">
+                <div class="subSectionTitle">序章</div>
+                <div class="subSectionDesc">先存档。<br>前往大厅。</div>
+            </div>
+            <div class="subSection">
+                <div class="subSectionTitle">地图</div>
+                <div class="subSectionDesc"><img src="map.jpg"></div>
+            </div>
+        </div>
+        <div class="comments">用户留言</div>
+        """;
+    var result = SteamGuideSource.ParseArticle(html, url, "回退标题");
+    Check(result.Value is { Title: "路线指南", HasVisualContent: true } &&
+        result.Value.Text.StartsWith("序章\n先存档。\n前往大厅。\n地图\n", StringComparison.Ordinal) &&
+        !result.Value.Text.Contains("用户留言", StringComparison.Ordinal),
+        "Preserve Steam section order and exclude comments.");
+    var imagesOnly = SteamGuideSource.ParseArticle(
+        """<div class="guide subSections"><div class="subSection"><div class="subSectionDesc"><img src="x"></div></div></div>""",
+        url, "标题");
+    Check(imagesOnly.Issue == GuideIssue.BrowserOnly, "A title alone does not make an image guide readable.");
+}
+
+static async Task SeiyaArticleAsync()
+{
+    const string legacyHtml = """
+        <meta http-equiv="content-type" content="text/html; charset=EUC-JP">
+        <title>作品攻略</title>
+        <table>
+          <tr><th>桜ルート</th><th>月ルート</th></tr>
+          <tr><td><input type="checkbox">朝まで待つ。<br>書庫に行く。</td><td><input type="checkbox">町に戻る。<br>鍵を探す。</td></tr>
+        </table>
+        """;
+    const string modernHtml = """
+        <meta charset="UTF-8"><title>作品攻略</title>
+        <table><tr><th>共通ルート</th></tr><tr><td>次へ進む。</td></tr></table>
+        """;
+    using var http = new HttpClient(new Handler(uri =>
+    {
+        if (uri.AbsolutePath == "/game/old.html")
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""
+                    <title>転・E/title>
+                    <meta http-equiv="refresh" content="0;url=https://galge.seiya-saiga.com/game/game/key/legacy.html">
+                    """),
+            };
+        if (uri.AbsolutePath == "/game/foreign.html")
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""<meta http-equiv="refresh" content="0;url=https://example.invalid/game/legacy.html">"""),
+            };
+        if (uri.Host == "galge.seiya-saiga.com" && uri.AbsolutePath == "/game/key/legacy.html")
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(CodePagesEncodingProvider.Instance.GetEncoding(51932)!.GetBytes(legacyHtml)),
+            };
+        if (uri.AbsolutePath == "/game/new.html")
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(Encoding.UTF8.GetBytes(modernHtml)),
+            };
+        throw new InvalidOperationException("Unexpected article request.");
+    }));
+    var source = new SeiyaGuideSource(new GuidePageClient(http));
+    var legacy = await source.ReadArticleAsync("https://seiya-saiga.com/game/old.html", "标题", default);
+    Check(legacy.Value?.Text == "桜ルート\n朝まで待つ。\n書庫に行く。\n月ルート\n町に戻る。\n鍵を探す。" &&
+        legacy.BrowserUrl?.AbsoluteUri == "https://galge.seiya-saiga.com/game/key/legacy.html",
+        "Fix the site's malformed redirect and read legacy EUC-JP routes in column order.");
+    var modern = await source.ReadArticleAsync("https://seiya-saiga.com/game/new.html", "标题", default);
+    Check(modern.Value?.Text == "共通ルート\n次へ進む。", "Respect a UTF-8 HTML declaration.");
+    var foreign = await source.ReadArticleAsync("https://seiya-saiga.com/game/foreign.html", "标题", default);
+    Check(foreign.Issue == GuideIssue.LayoutChanged, "Stay within supported Seiya domains.");
+}
+
+static void ExtendedHistory()
+{
+    var game = Guid.NewGuid();
+    var old = JsonSerializer.Deserialize<GameGuideHistory>(
+        """{"Df2an":{"Article":{"Source":1,"Id":"42"},"Title":"旧攻略"},"Ymgal":null,"LastSource":1}""");
+    Check(old?.Get(GuideSource.Df2an)?.Article.Id == "42" && old.Get(GuideSource.Seiya) is null,
+        "Old preferences and reading history must load without migration.");
+    var history = new ConcurrentDictionary<Guid, GameGuideHistory>();
+    history[game] = old!;
+    var cngal = new GuideReading(new(GuideSource.Cngal, "418"), "路线指南");
+    var seiya = new GuideReading(new(GuideSource.Seiya, "https://seiya-saiga.com/game/new.html"), "日文攻略");
+    var steam = new GuideReading(new(GuideSource.Steam, "42"), "指南");
+    foreach (var entry in new[] { cngal, seiya, steam }) GuideHistory.Remember(history, game, entry);
+    var bookmark = new GuideBookmark("entry", 12, .5);
+    Check(GuideHistory.RememberPosition(history, game, seiya.Article, bookmark), "Expected an updated Seiya bookmark.");
+    var restored = JsonSerializer.Deserialize<GameGuideHistory>(JsonSerializer.Serialize(history[game]));
+    Check(restored?.Get(GuideSource.Seiya)?.Bookmark == bookmark && restored.LastSource == GuideSource.Steam &&
+        restored.Get(GuideSource.Cngal) == cngal && restored.Get(GuideSource.Steam) == steam &&
+        restored.Get(GuideSource.Df2an)?.Article.Id == "42",
+        "Each source maintains its own bookmark without changing the most recently opened source.");
 }
 
 static void WebLinks()
@@ -365,6 +556,16 @@ static void WebLinks()
         "https://steamcommunity.com/app/4262610/guides/?l=schinese" &&
         GuideWebLinks.SteamGuides("0") is null && GuideWebLinks.SteamGuides("1/guides") is null,
         "Only a valid app ID generates a Steam guide link.");
+    Check(GuideWebLinks.ReaderReference(new Uri("https://www.cngal.org/articles/index/418")) ==
+            new GuideReference(GuideSource.Cngal, "418") &&
+        GuideWebLinks.ReaderReference(new Uri("https://steamcommunity.com/sharedfiles/filedetails/?l=schinese&id=65#part")) ==
+            new GuideReference(GuideSource.Steam, "65") &&
+        GuideWebLinks.ReaderReference(new Uri("https://steamcommunity.com/sharedfiles/filedetails/?id=65&id=66")) is null &&
+        GuideWebLinks.ReaderReference(new Uri("http://seiya-saiga.com/game/key/game.html#route")) ==
+            new GuideReference(GuideSource.Seiya, "https://seiya-saiga.com/game/key/game.html") &&
+        GuideWebLinks.ReaderReference(SeiyaGuideSource.AllAges) is null &&
+        GuideWebLinks.ReaderReference(SeiyaGuideSource.AllAgesPc) is null,
+        "Route trusted article URLs to their readers without handling arbitrary URLs or index links.");
     var saved = new SavedGuideLink(Guid.NewGuid(), mirror.AbsoluteUri, "全路线", new GuideBookmark("route", 4, 0.2));
     Check(JsonSerializer.Deserialize<SavedGuideLink[]>(JsonSerializer.Serialize(new[] { saved })) is [var restored] &&
         restored == saved, "Saved links retain title, URL, ID and reading progress.");

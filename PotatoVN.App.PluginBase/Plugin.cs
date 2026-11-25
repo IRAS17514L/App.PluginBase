@@ -43,7 +43,7 @@ namespace PotatoVN.App.PluginBase
         {
             Id = new Guid("c9a68427-b773-4a98-bb66-2c6f4a4ebe37"),
             Name = "攻略面板",
-            Description = "提供攻略检索与独立浮窗阅读，支持多站攻略检索、本地文本、自定义链接和 Steam 社区指南。",
+            Description = "支持多站攻略聚合搜索、浮窗阅读、本地文本和自定义链接。",
         };
 
         public async Task InitializeAsync(IPotatoVnApi hostApi)
@@ -288,9 +288,9 @@ namespace PotatoVN.App.PluginBase
                 Data.Domain = Df2anGuideSource.DefaultDomain;
                 changed = true;
             }
-            if (Data.Version < 5)
+            if (Data.Version < 6)
             {
-                Data.Version = 5;
+                Data.Version = 6;
                 changed = true;
             }
             return changed;
@@ -355,7 +355,7 @@ namespace PotatoVN.App.PluginBase.Models
     /// </summary>
     public partial class WalkthroughData : ObservableObject
     {
-        public int Version { get; set; } = 5;
+        public int Version { get; set; } = 6;
 
         /// <summary>2DFan 域名（官方域会被墙，备用域 2dfdf.de / 2dfmax.top）</summary>
         [ObservableProperty] private string _domain = Df2anGuideSource.DefaultDomain;

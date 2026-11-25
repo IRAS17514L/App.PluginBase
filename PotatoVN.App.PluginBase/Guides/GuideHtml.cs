@@ -48,7 +48,19 @@ internal static class GuideHtml
             string.IsNullOrWhiteSpace(title) ? fallbackTitle : title, body), url);
     }
 
-    private static string ToText(IElement element)
+    internal static GuideResult<GuideArticle> ArticleFromBody(IElement body, string title, Uri url)
+    {
+        string text = ToText(body);
+        bool hasVisualContent = HasVisualContent(body);
+        if (text.Length == 0)
+            return GuideResult<GuideArticle>.Failed(hasVisualContent ? GuideIssue.BrowserOnly : GuideIssue.ArticleMissing, url);
+        return GuideResult<GuideArticle>.Found(new GuideArticle(title, text, hasVisualContent), url);
+    }
+
+    internal static bool HasVisualContent(IElement element) =>
+        element.QuerySelector("img, video, iframe, picture, table") is not null;
+
+    internal static string ToText(IElement element)
     {
         var output = new StringBuilder();
         var stack = new Stack<(INode Node, bool EndsBlock)>();

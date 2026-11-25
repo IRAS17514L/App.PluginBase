@@ -22,6 +22,7 @@ internal sealed class CngalGuideSource(GuidePageClient pages)
     private sealed record SearchPage(Hit[]? Data);
     private sealed record SearchPayload(SearchPage? PagedResultDto);
     private sealed record Article(int Id, string? Type, string? Name, string? DisplayName);
+    private sealed record ArticlePayload(string? Name, string? DisplayName, string? MainPage, bool IsHidden);
     private sealed record EntryPayload(string? Type, Article[]? ArticleRelevances);
 
     internal async Task<WebGuideResult> SearchAsync(GuideGame game, CancellationToken token)
@@ -62,6 +63,35 @@ internal sealed class CngalGuideSource(GuidePageClient pages)
                                       error is OperationCanceledException && !token.IsCancellationRequested)
         {
             return WebGuideResult.Failure(GuideIssue.Unavailable, browse);
+        }
+    }
+
+    internal async Task<GuideResult<GuideArticle>> ReadArticleAsync(string id, string fallbackTitle, CancellationToken token)
+    {
+        var url = new Uri(Site, $"articles/index/{id}");
+        try
+        {
+            var article = await ReadAsync<ArticlePayload>($"api/articles/GetArticleView/{id}", token);
+            if (article is null || article.IsHidden || string.IsNullOrWhiteSpace(article.MainPage))
+                return GuideResult<GuideArticle>.Failed(GuideIssue.ArticleMissing, url);
+
+            string? displayName = string.IsNullOrWhiteSpace(article.DisplayName) ? article.Name : article.DisplayName;
+            string title = string.IsNullOrWhiteSpace(displayName) ? fallbackTitle : displayName.Trim();
+            return await Task.Run(() =>
+            {
+                var page = GuideHtml.Parse(article.MainPage);
+                return page.Body is { } body ? GuideHtml.ArticleFromBody(body, title, url)
+                    : GuideResult<GuideArticle>.Failed(GuideIssue.LayoutChanged, url);
+            }, token);
+        }
+        catch (JsonException) { return GuideResult<GuideArticle>.Failed(GuideIssue.LayoutChanged, url); }
+        catch (HttpRequestException error) when (error.StatusCode == HttpStatusCode.NotFound)
+        {
+            return GuideResult<GuideArticle>.Failed(GuideIssue.ArticleMissing, url);
+        }
+        catch (Exception error) when (error is IOException or HttpRequestException)
+        {
+            return GuideResult<GuideArticle>.Failed(GuideIssue.Unavailable, url);
         }
     }
 

@@ -12,7 +12,15 @@ namespace PotatoVN.App.PluginBase;
 public partial class Plugin
 {
     private Task<WebGuideResult> SearchWebSourceAsync(GuideGame game, GuideSource source, CancellationToken token) =>
-        source == GuideSource.Cngal ? _cngal.SearchAsync(game, token) : _seiya.SearchAsync(game, token);
+        source switch
+        {
+            GuideSource.Cngal => _cngal.SearchAsync(game, token),
+            GuideSource.Seiya => _seiya.SearchAsync(game, token),
+            GuideSource.Steam when GuideWebLinks.SteamGuides(game.SteamId) is { } url => _steam.SearchAsync(url, token),
+            GuideSource.Steam => Task.FromResult(WebGuideResult.Failure(GuideIssue.MissingGameId,
+                new Uri("https://steamcommunity.com/"))),
+            _ => throw new ArgumentOutOfRangeException(nameof(source)),
+        };
 
     private Task ShowWebSourceAsync(Galgame game, GuideGame names, PanelState state, GuideSource source) =>
         RunPanelLoadAsync(state, $"正在查找{SourceName(source)}攻略…", async token =>
@@ -21,9 +29,10 @@ public partial class Plugin
             if (!IsCurrentPanelRequest(state, token)) return;
             SetOpenSite(state, results.BrowseUrl.AbsoluteUri);
             state.Status.Text = results.Links.Count > 0
-                ? $"选择{SourceName(source)}攻略，在浏览器打开。"
+                ? $"选择{SourceName(source)}攻略"
                 : DescribeIssue(source, results.Issue);
-            AddWebResults(state, source, results);
+            foreach (GuideLink article in results.Links)
+                AddOnlineGuideRow(game, state, source, article);
             AddOtherGuideActions(game, names, state);
         });
 
@@ -40,11 +49,19 @@ public partial class Plugin
             AddResultRow(state.Content, 0, "打开 Steam 社区指南", () => OpenGuideInBrowserAsync(steam.AbsoluteUri));
     }
 
-    private static void AddWebResults(PanelState state, GuideSource source, WebGuideResult result)
+    private void AddOnlineGuideRow(Galgame game, PanelState state, GuideSource source, GuideLink article)
     {
-        foreach (GuideLink item in result.Links)
-            AddResultRow(state.Content, 0, $"[{SourceName(source)}] {item.Title}",
-                () => OpenGuideInBrowserAsync(item.Id));
+        AddResultRow(state.Content, 0, $"[{SourceName(source)}] {article.Title}", () =>
+        {
+            GuideReference? reference = source is GuideSource.Df2an or GuideSource.Ymgal
+                ? new GuideReference(source, article.Id)
+                : GuideWebLinks.TryParse(article.Id, out Uri url) ? GuideWebLinks.ReaderReference(url) : null;
+            if (reference is not { IsValid: true } match || match.Source != source)
+                return OpenGuideInBrowserAsync(article.Id);
+
+            PushBack(state);
+            return OpenArticleAsync(game, state, match, article.Title);
+        });
     }
 
     private SavedGuideLink[] GetSavedLinks(Guid gameId) =>
@@ -167,16 +184,17 @@ public partial class Plugin
             string title = string.IsNullOrWhiteSpace(link.Title) ? $"{SourceName(reference.Source)}攻略" : link.Title;
             var result = await ReadOnlineArticleAsync(reference, title, token);
             if (!IsCurrentPanelRequest(state, token)) return;
-            SetOpenSite(state, address.AbsoluteUri);
+            Uri original = reference.Source == GuideSource.Seiya ? result.BrowserUrl ?? address : address;
+            SetOpenSite(state, original.AbsoluteUri);
             if (result.Value is { } article)
             {
-                PresentArticle(state, article.Text, link.Bookmark,
+                PresentOnlineArticle(state, article, original, link.Bookmark,
                     bookmark => RememberSavedLinkPosition(game.Uuid, link, bookmark));
                 return;
             }
 
             state.Status.Text = DescribeIssue(reference.Source, result.Issue);
-            AddResultRow(state.Content, 0, "在浏览器打开原文", () => OpenGuideInBrowserAsync(address.AbsoluteUri));
+            AddResultRow(state.Content, 0, "在浏览器打开原文", () => OpenGuideInBrowserAsync(original.AbsoluteUri));
         });
     }
 

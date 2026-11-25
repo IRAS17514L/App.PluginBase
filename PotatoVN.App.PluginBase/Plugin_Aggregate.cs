@@ -21,7 +21,6 @@ public partial class Plugin
             {
                 GuideSource.Df2an => await _df2an.SearchArticlesAsync(names, ct),
                 GuideSource.Ymgal => GuideSiteResults.From(site, await _ymgal.SearchAsync(names, ct)),
-                GuideSource.Steam => GuideSiteResults.From(site, await _steam.SearchAsync(steam!, ct)),
                 _ => GuideSiteResults.From(site, await SearchWebSourceAsync(names, site, ct)),
             }, (site, error) => _hostApi.DeveloperEvent(msg: $"聚合搜索：{SourceName(site)}查询失败", e: error), token);
 
@@ -69,17 +68,7 @@ public partial class Plugin
         RenderResumeAction(game, state);
 
         foreach (var item in results)
-        {
-            string label = $"[{SourceName(item.Source)}] {item.Link.Title}";
-            AddResultRow(state.Content, 0, label, () =>
-            {
-                if (item.Source is not (GuideSource.Df2an or GuideSource.Ymgal))
-                    return OpenGuideInBrowserAsync(item.Link.Id);
-
-                PushBack(state);
-                return OpenArticleAsync(game, state, new GuideReference(item.Source, item.Link.Id), item.Link.Title);
-            });
-        }
+            AddOnlineGuideRow(game, state, item.Source, item.Link);
 
         if (expanded || results.Count < all.Count)
         {

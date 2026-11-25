@@ -22,14 +22,35 @@ internal static class GuideWebLinks
 
     internal static GuideReference? ReaderReference(Uri address)
     {
-        if (!address.IsDefaultPort) return null;
+        if (address.Scheme is not ("http" or "https") || !address.IsDefaultPort || address.UserInfo.Length != 0)
+            return null;
         if (Df2anGuideSource.IsKnownHost(address) &&
             GuideIds.FromPath(address.AbsolutePath, "/topics/") is { } topic)
             return new GuideReference(GuideSource.Df2an, topic);
         if (address.Host is "ymgal.games" or "www.ymgal.games" &&
             GuideIds.FromPath(address.AbsolutePath, "/co/article/") is { } article)
             return new GuideReference(GuideSource.Ymgal, article);
+        if (address.Host is "www.cngal.org" or "cngal.org" &&
+            GuideIds.FromPath(address.AbsolutePath, "/articles/index/") is { } cngalArticle)
+            return new GuideReference(GuideSource.Cngal, cngalArticle);
+        if (address.Host is "steamcommunity.com" or "www.steamcommunity.com" &&
+            address.AbsolutePath.TrimEnd('/') == "/sharedfiles/filedetails" && SteamFileId(address) is { } guide)
+            return new GuideReference(GuideSource.Steam, guide);
+        if (SeiyaGuideSource.IsArticleUrl(address))
+            return new GuideReference(GuideSource.Seiya, SeiyaGuideSource.CanonicalUrl(address).AbsoluteUri);
         return null;
+    }
+
+    private static string? SteamFileId(Uri address)
+    {
+        string? id = null;
+        foreach (string parameter in address.Query.TrimStart('?').Split('&'))
+        {
+            if (!parameter.StartsWith("id=", StringComparison.Ordinal)) continue;
+            if (id is not null || !GuideIds.IsValid(parameter[3..])) return null;
+            id = parameter[3..].TrimStart('0');
+        }
+        return id;
     }
 
     internal static Uri? SteamGuides(string? id) =>

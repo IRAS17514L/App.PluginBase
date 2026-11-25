@@ -49,38 +49,6 @@ public partial class Plugin : IGalgamePageRightPanel
                 Data.Domain = selected;
         };
 
-        Button detectButton = new() { Content = "检测并切换 2DFan 域名" };
-        detectButton.Click += async (_, _) =>
-        {
-            detectButton.IsEnabled = false;
-            try
-            {
-                string? found = await _df2an.ProbeAsync(_lifetimeCts.Token);
-                if (found is null)
-                {
-                    Plugin.HostApi.Info(InfoBarSeverity.Warning,
-                        "未检测到可用的 2DFan 域名，请检查网络");
-                    return;
-                }
-                Data.Domain = found;
-                domainBox.SelectedItem = found;
-                Plugin.HostApi.Info(InfoBarSeverity.Success,
-                    $"已切换到可用域名：{found}");
-            }
-            catch (OperationCanceledException) when (_lifetimeCts.IsCancellationRequested) { }
-            catch (Exception e)
-            {
-                Plugin.HostApi.Info(InfoBarSeverity.Warning, "域名检测失败", e.Message);
-            }
-            finally
-            {
-                detectButton.IsEnabled = true;
-            }
-        };
-        StackPanel domainStack = new() { Spacing = 6 };
-        domainStack.Children.Add(domainBox);
-        domainStack.Children.Add(detectButton);
-
         Button clearButton = new() { Content = "清除阅读记录" };
         StdSetting? associationSetting = null;
         clearButton.Click += (_, _) =>
@@ -126,7 +94,7 @@ public partial class Plugin : IGalgamePageRightPanel
             "打开浮窗时使用的方式。本地优先会先打开已挂载的攻略。", sourceBox));
         panel.Children.Add(CreateOnlineSourcesSetting(domainBox));
         panel.Children.Add(new StdSetting("2DFan 域名",
-            "当前域名连不上时，可检测并切换到可用的备用域名。", domainStack));
+            "访问失败时，搜索会尝试备用域名。也可在「检测各站连接」后手动切换。", domainBox));
         int readingCount = Data.ReadingHistory.Keys
             .Union(Data.LocalGuides.Where(pair => pair.Value?.Bookmark is not null).Select(pair => pair.Key))
             .Union(Data.SavedLinks.Where(pair => pair.Value.Any(link => link.Bookmark is not null))
@@ -216,14 +184,10 @@ public partial class Plugin : IGalgamePageRightPanel
                 CreateSourceToggle(null, "在线自动", "并行搜索在插件设置中勾选的网站"),
                 CreateSourceToggle(GuideSource.Df2an, "2DFan", "只在 2DFan 查找攻略"),
                 CreateSourceToggle(GuideSource.Ymgal, "月幕", "只在月幕查找攻略"),
-                CreateSourceToggle(GuideSource.Cngal, "CnGal", "查找 CnGal 攻略，在浏览器阅读原文"),
-                CreateSourceToggle(GuideSource.Seiya, "誠也の部屋", "查找誠也の部屋攻略，在浏览器阅读原文"));
-            if (GuideWebLinks.SteamGuides(DescribeGame(game).SteamId) is { } steam)
-            {
-                var steamButton = CreateGuideButton("Steam", "在浏览器打开此游戏的 Steam 社区指南");
-                steamButton.Click += async (_, _) => await OpenGuideInBrowserAsync(steam.AbsoluteUri);
-                sourceButtons.Children.Add(steamButton);
-            }
+                CreateSourceToggle(GuideSource.Cngal, "CnGal", "查找并在浮窗阅读 CnGal 攻略"),
+                CreateSourceToggle(GuideSource.Seiya, "誠也の部屋", "查找并在浮窗阅读誠也の部屋攻略"));
+            if (GuideWebLinks.SteamGuides(DescribeGame(game).SteamId) is not null)
+                sourceButtons.Children.Add(CreateSourceToggle(GuideSource.Steam, "Steam", "查找并在浮窗阅读 Steam 社区指南"));
 
             var personalSources = GuideCommandRow(
                 CreateSourceToggle(GuideSource.Local, "本地", "打开或挂载本地文本攻略"),
@@ -299,7 +263,7 @@ public partial class Plugin : IGalgamePageRightPanel
 
                 _ = ShowSourceAsync(game, state);
             });
-            var findButton = CreateGuideButton("查找正文", "在攻略正文查找文字（Ctrl+F）",
+            var findButton = CreateGuideButton("查找正文", "在攻略正文查找文字",
                 () => state.Reader?.OpenFind());
             state.FindButton = findButton;
 
@@ -344,7 +308,7 @@ public partial class Plugin : IGalgamePageRightPanel
             detailedTools.Children.Add(readingRow);
 
             var compactBack = CreateGuideButton("返回", "返回上一步", () => PopBack(state), "\uE72B");
-            var compactFind = CreateGuideButton("查找正文", "在攻略正文查找文字（Ctrl+F）",
+            var compactFind = CreateGuideButton("查找正文", "在攻略正文查找文字",
                 () => state.Reader?.OpenFind(), "\uE721");
             SetGuideControlSize(compactBack, compact: true);
             SetGuideControlSize(compactFind, compact: true);

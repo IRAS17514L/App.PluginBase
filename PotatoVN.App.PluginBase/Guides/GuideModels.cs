@@ -12,24 +12,49 @@ public enum GuideSource { Df2an = 1, Ymgal = 2, Local = 3, Cngal = 4, Seiya = 5,
 
 public readonly record struct GuideReference(GuideSource Source, string Id)
 {
-    internal bool IsValid => (Source is GuideSource.Df2an or GuideSource.Ymgal) && GuideIds.IsValid(Id);
+    internal bool IsValid => Source switch
+    {
+        GuideSource.Df2an or GuideSource.Ymgal or GuideSource.Cngal or GuideSource.Steam => GuideIds.IsValid(Id),
+        GuideSource.Seiya => GuideWebLinks.TryParse(Id, out Uri url) && SeiyaGuideSource.IsArticleUrl(url),
+        _ => false,
+    };
 }
 
 public sealed record GuideBookmark(string? ParagraphKey, int ParagraphIndex, double Progress);
 
 public sealed record GuideReading(GuideReference Article, string? Title, GuideBookmark? Bookmark = null);
 
-public sealed record GameGuideHistory(GuideReading? Df2an, GuideReading? Ymgal, GuideSource LastSource)
+public sealed record GameGuideHistory(GuideReading? Df2an, GuideReading? Ymgal, GuideSource LastSource,
+    GuideReading? Cngal = null, GuideReading? Seiya = null, GuideReading? Steam = null)
 {
     internal GuideReading? Get(GuideSource source)
     {
-        GuideReading? reading = source switch { GuideSource.Df2an => Df2an, GuideSource.Ymgal => Ymgal, _ => null };
+        GuideReading? reading = source switch
+        {
+            GuideSource.Df2an => Df2an,
+            GuideSource.Ymgal => Ymgal,
+            GuideSource.Cngal => Cngal,
+            GuideSource.Seiya => Seiya,
+            GuideSource.Steam => Steam,
+            _ => null,
+        };
         return reading is not null && reading.Article.IsValid && reading.Article.Source == source ? reading : null;
     }
 
-    internal GameGuideHistory With(GuideReading reading) => reading.Article.Source == GuideSource.Df2an
-        ? this with { Df2an = reading, LastSource = GuideSource.Df2an }
-        : this with { Ymgal = reading, LastSource = GuideSource.Ymgal };
+    internal GameGuideHistory With(GuideReading reading, bool makeLastSource = true)
+    {
+        GuideSource source = reading.Article.Source;
+        GameGuideHistory updated = source switch
+        {
+            GuideSource.Df2an => this with { Df2an = reading },
+            GuideSource.Ymgal => this with { Ymgal = reading },
+            GuideSource.Cngal => this with { Cngal = reading },
+            GuideSource.Seiya => this with { Seiya = reading },
+            GuideSource.Steam => this with { Steam = reading },
+            _ => throw new ArgumentOutOfRangeException(nameof(reading)),
+        };
+        return makeLastSource ? updated with { LastSource = source } : updated;
+    }
 }
 
 internal static class GuideHistory
@@ -61,16 +86,14 @@ internal static class GuideHistory
                history?.Get(article.Source) is { } prior && prior.Article == article && prior.Bookmark != bookmark)
         {
             var reading = prior with { Bookmark = bookmark };
-            var updated = article.Source == GuideSource.Df2an
-                ? history with { Df2an = reading }
-                : history with { Ymgal = reading };
+            var updated = history.With(reading, makeLastSource: false);
             if (readings.TryUpdate(gameId, updated, history)) return true;
         }
         return false;
     }
 }
 
-internal enum GuideIssue { None, NoResults, MissingGameId, Unavailable, LayoutChanged, ArticleMissing }
+internal enum GuideIssue { None, NoResults, MissingGameId, Unavailable, LayoutChanged, ArticleMissing, BrowserOnly }
 
 internal sealed record GuideResult<T>(T? Value, GuideIssue Issue, Uri? BrowserUrl) where T : class
 {
@@ -80,7 +103,7 @@ internal sealed record GuideResult<T>(T? Value, GuideIssue Issue, Uri? BrowserUr
 
 internal sealed record GuideLink(string Id, string Title);
 
-internal sealed record GuideArticle(string Title, string Text);
+internal sealed record GuideArticle(string Title, string Text, bool HasVisualContent = false);
 
 internal sealed record GuideGame(string? ChineseName, string? OriginalName, string? DisplayName, string? YmgalId,
     string? CngalId = null, string? SteamId = null)
