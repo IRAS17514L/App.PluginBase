@@ -61,8 +61,12 @@ public partial class Plugin
 
             AddResultRow(state.Content, 0, "手动选择文本文件…", async () =>
             {
+                if (state.IsPickingLocalFile) return;
                 var request = state.RequestCancellation;
-                string? path = await PickLocalTextAsync(state.Window);
+                string? path;
+                state.IsPickingLocalFile = true;
+                try { path = await PickLocalTextAsync(state.Window); }
+                finally { state.IsPickingLocalFile = false; }
                 if (path is null || !ReferenceEquals(request, state.RequestCancellation) ||
                     state.CurrentSource != GuideSource.Local || !state.Window.AppWindow.IsVisible) return;
                 await OpenLocalAsync(game, state, LocalGuideFile.Mount(path, game.LocalPath, SelectedEncoding()));
@@ -82,7 +86,12 @@ public partial class Plugin
             {
                 AddResultRow(state.Content, 0, "解除攻略挂载", async () =>
                 {
-                    if (Data.LocalGuides.TryRemove(game.Uuid, out _)) SaveData();
+                    if (Data.LocalGuides.TryRemove(game.Uuid, out _))
+                    {
+                        if (Data.LastReadings.TryGetValue(game.Uuid, out var reading) && reading.Source == GuideSource.Local)
+                            Data.LastReadings.TryRemove(game.Uuid, out _);
+                        SaveData();
+                    }
                     await ShowLocalAsync(game, state);
                 });
             }
@@ -95,6 +104,8 @@ public partial class Plugin
         string? path = LocalGuideFile.Resolve(mount, game.LocalPath);
         return RunPanelLoadAsync(state, "正在打开本地攻略…", async token =>
         {
+            var reading = new GuideResume(GuideSource.Local);
+            state.ActiveReading = reading;
             string? text = null;
             string? error = null;
             try
@@ -121,10 +132,8 @@ public partial class Plugin
             LocalGuideMount saved = mount with { Bookmark = marker };
             PresentArticle(state, text, marker, position => RememberLocalPosition(game.Uuid, saved, position));
             if (previous != saved)
-            {
                 Data.LocalGuides[game.Uuid] = saved;
-                SaveData();
-            }
+            RememberReading(game.Uuid, reading);
         });
     }
 

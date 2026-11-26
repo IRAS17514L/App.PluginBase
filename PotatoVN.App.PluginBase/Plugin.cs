@@ -43,7 +43,7 @@ namespace PotatoVN.App.PluginBase
         {
             Id = new Guid("c9a68427-b773-4a98-bb66-2c6f4a4ebe37"),
             Name = "攻略面板",
-            Description = "支持多站攻略聚合搜索、浮窗阅读、本地文本和自定义链接。",
+            Description = "支持多站攻略聚合搜索、浮窗阅读、本地文件、自定义网页与粘贴文本。",
         };
 
         public async Task InitializeAsync(IPotatoVnApi hostApi)
@@ -241,6 +241,7 @@ namespace PotatoVN.App.PluginBase
         private bool NormalizeData()
         {
             bool changed = false;
+            bool migrateReaders = Data.Version < 11 || Data.TopicUrlMap is not null;
             if (Data.ReadingHistory is null)
             {
                 Data.ReadingHistory = new();
@@ -251,19 +252,23 @@ namespace PotatoVN.App.PluginBase
                 Data.LocalGuides = new();
                 changed = true;
             }
-            if (Data.SavedLinks is null)
+            if (Data.SavedGuides is null)
             {
-                Data.SavedLinks = new();
+                Data.SavedGuides = new();
                 changed = true;
             }
-            foreach (var (gameId, links) in Data.SavedLinks)
+            if (Data.LastReadings is null)
             {
-                var valid = links?.Where(link => link is not null && link.Id != Guid.Empty &&
-                    GuideWebLinks.TryParse(link.Url, out _)).DistinctBy(link => link.Id).ToArray() ?? [];
+                Data.LastReadings = new();
+                changed = true;
+            }
+            foreach (var (gameId, links) in Data.SavedGuides)
+            {
+                var valid = links?.Where(guide => guide is { IsValid: true }).DistinctBy(guide => guide.Id).ToArray() ?? [];
                 if (valid.Length == 0)
-                    changed |= Data.SavedLinks.TryRemove(gameId, out _);
+                    changed |= Data.SavedGuides.TryRemove(gameId, out _);
                 else if (valid.Length != links!.Length)
-                    changed |= Data.SavedLinks.TryUpdate(gameId, valid, links);
+                    changed |= Data.SavedGuides.TryUpdate(gameId, valid, links);
             }
             if (Data.TopicUrlMap is { } legacy)
             {
@@ -271,6 +276,21 @@ namespace PotatoVN.App.PluginBase
                 Data.TopicUrlMap = null;
                 changed = true;
             }
+            if (migrateReaders)
+            {
+                foreach (Guid gameId in Data.ReadingHistory.Keys.Union(Data.LocalGuides.Keys).Union(Data.SavedGuides.Keys))
+                {
+                    Data.ReadingHistory.TryGetValue(gameId, out var history);
+                    Data.LocalGuides.TryGetValue(gameId, out var local);
+                    if (GuideResume.FromLegacy(history, local, GetSavedGuides(gameId)) is { } reading)
+                        changed |= Data.LastReadings.TryAdd(gameId, reading);
+                }
+            }
+            foreach (var (gameId, reading) in Data.LastReadings)
+                if (reading is null || !CanOpenReading(gameId, reading))
+                    changed |= Data.LastReadings.TryRemove(gameId, out _);
+            changed |= CachedGuideText.Trim(Data.LastReadings);
+
             GuideSource[] onlineSources = GuideAggregation.NormalizeSources(Data.AutoSearchSources);
             if (Data.AutoSearchSources is null || !Data.AutoSearchSources.SequenceEqual(onlineSources))
             {
@@ -288,9 +308,34 @@ namespace PotatoVN.App.PluginBase
                 Data.Domain = Df2anGuideSource.DefaultDomain;
                 changed = true;
             }
-            if (Data.Version < 6)
+            int fontSize = GuideAppearance.ClampFontSize(Data.ReaderFontSize);
+            int transparency = GuideAppearance.ClampTransparency(Data.WindowTransparency);
+            if (Data.ReaderFontSize != fontSize || Data.WindowTransparency != transparency)
             {
-                Data.Version = 6;
+                Data.ReaderFontSize = fontSize;
+                Data.WindowTransparency = transparency;
+                changed = true;
+            }
+            if (Data.FloatingPlacement is { IsValid: false })
+            {
+                Data.FloatingPlacement = null;
+                changed = true;
+            }
+            if (Data.CompactFloatingSize is { IsValid: false })
+            {
+                Data.CompactFloatingSize = null;
+                changed = true;
+            }
+            if (Data.DetailedFloatingSize is { IsValid: false })
+            {
+                Data.DetailedFloatingSize = null;
+                changed = true;
+            }
+            if (Data.Version < 13)
+            {
+                if (Data.FloatingPlacement is { } placement && Data.GetFloatingSize(Data.MinimalMode) is null)
+                    Data.SetFloatingSize(Data.MinimalMode, placement.Size);
+                Data.Version = 13;
                 changed = true;
             }
             return changed;
@@ -355,7 +400,7 @@ namespace PotatoVN.App.PluginBase.Models
     /// </summary>
     public partial class WalkthroughData : ObservableObject
     {
-        public int Version { get; set; } = 6;
+        public int Version { get; set; }
 
         /// <summary>2DFan 域名（官方域会被墙，备用域 2dfdf.de / 2dfmax.top）</summary>
         [ObservableProperty] private string _domain = Df2anGuideSource.DefaultDomain;
@@ -366,8 +411,10 @@ namespace PotatoVN.App.PluginBase.Models
         [ObservableProperty] private GuideSource[] _autoSearchSources = GuideAggregation.NormalizeSources(null);
 
         public ConcurrentDictionary<Guid, GameGuideHistory> ReadingHistory { get; set; } = new();
+        public ConcurrentDictionary<Guid, GuideResume> LastReadings { get; set; } = new();
         public ConcurrentDictionary<Guid, LocalGuideMount> LocalGuides { get; set; } = new();
-        public ConcurrentDictionary<Guid, SavedGuideLink[]> SavedLinks { get; set; } = new();
+        [JsonPropertyName("SavedLinks")]
+        public ConcurrentDictionary<Guid, SavedGuide[]> SavedGuides { get; set; } = new();
 
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public Dictionary<Guid, string>? TopicUrlMap { get; set; }
@@ -386,5 +433,21 @@ namespace PotatoVN.App.PluginBase.Models
 
         /// <summary>浮窗是否默认使用简洁模式</summary>
         [ObservableProperty] private bool _minimalMode = false;
+
+        [ObservableProperty] private int _readerFontSize = GuideAppearance.DefaultFontSize;
+        [ObservableProperty] private int _windowTransparency;
+        [ObservableProperty] private bool _autoHideAtScreenEdge = true;
+        [ObservableProperty] private bool _hasSeenGuideHelp;
+        [ObservableProperty] private GuideWindowPlacement? _floatingPlacement;
+        [ObservableProperty] private GuideWindowSize? _compactFloatingSize;
+        [ObservableProperty] private GuideWindowSize? _detailedFloatingSize;
+
+        internal GuideWindowSize? GetFloatingSize(bool compact) => compact ? CompactFloatingSize : DetailedFloatingSize;
+
+        internal void SetFloatingSize(bool compact, GuideWindowSize size)
+        {
+            if (compact) CompactFloatingSize = size;
+            else DetailedFloatingSize = size;
+        }
     }
 }

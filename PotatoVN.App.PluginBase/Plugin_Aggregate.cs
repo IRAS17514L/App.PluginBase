@@ -42,13 +42,18 @@ public partial class Plugin
 
     private void RenderResumeAction(Galgame game, PanelState state)
     {
-        if (!Data.ReadingHistory.TryGetValue(game.Uuid, out GameGuideHistory? history) ||
-            history?.Get(history.LastSource) is not { } reading) return;
-        string title = string.IsNullOrWhiteSpace(reading.Title) ? SourceName(reading.Article.Source) : reading.Title;
+        if (GetLastReading(game.Uuid) is not { } reading) return;
+        string title = reading.Source switch
+        {
+            GuideSource.Local => "本地攻略",
+            GuideSource.SavedLinks when FindSavedReading(game.Uuid, reading) is { } guide => SavedGuideTitle(guide),
+            _ => reading.Cached?.Title ?? (Data.ReadingHistory.TryGetValue(game.Uuid, out var history)
+                ? history?.Get(reading.Source)?.Title : null) ?? "上次的攻略",
+        };
         AddResultRow(state.Content, 0, $"继续阅读 · {title}", () =>
         {
             PushBack(state);
-            return OpenArticleAsync(game, state, reading.Article, reading.Title);
+            return OpenReadingAsync(game, state, reading, useCache: true);
         });
     }
 

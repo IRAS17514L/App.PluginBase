@@ -27,9 +27,12 @@ internal sealed class FloatingWindowPin : IDisposable
     private bool _disposed;
 
     internal FloatingWindowPin(Window window, bool pinned)
+        : this(WinRT.Interop.WindowNative.GetWindowHandle(window), window.DispatcherQueue, pinned) { }
+
+    internal FloatingWindowPin(IntPtr window, DispatcherQueue dispatcher, bool pinned)
     {
-        _window = WinRT.Interop.WindowNative.GetWindowHandle(window);
-        _dispatcher = window.DispatcherQueue;
+        _window = window;
+        _dispatcher = dispatcher;
         _timer = _dispatcher.CreateTimer();
         _timer.IsRepeating = false;
         _timer.Tick += Recheck;
@@ -48,6 +51,8 @@ internal sealed class FloatingWindowPin : IDisposable
         _pinned = pinned;
         Update();
     }
+
+    internal void CancelScheduledRechecks() => _timer.Stop();
 
     private bool IsActive => !_disposed && _shown && _pinned;
 

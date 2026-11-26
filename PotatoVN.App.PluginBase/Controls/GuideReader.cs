@@ -28,11 +28,12 @@ internal sealed class GuideReader
     private int _selected;
     private int _queryLength;
     private bool _ready;
+    private bool _restoreQueued;
 
     internal TextBlock Body { get; }
 
     internal GuideReader(string body, GuideBookmark? bookmark, ScrollViewer scroll, Grid findHost,
-        Action<GuideBookmark> remember)
+        Action<GuideBookmark> remember, int fontSize)
     {
         _document = new GuideText(body);
         _bookmark = bookmark;
@@ -42,8 +43,8 @@ internal sealed class GuideReader
         Body = new TextBlock
         {
             TextWrapping = TextWrapping.Wrap,
-            FontSize = 13,
-            LineHeight = 20,
+            FontSize = fontSize,
+            LineHeight = LineHeightFor(fontSize),
             IsTextSelectionEnabled = true,
             Padding = new Thickness(4, 0, 4, 4),
         };
@@ -79,21 +80,58 @@ internal sealed class GuideReader
             SetLabel(close, "关闭查找");
             close.Click += (_, _) => CloseFind();
 
-            Grid row = new() { ColumnSpacing = 4, Margin = new Thickness(4, 2, 4, 4) };
-            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            for (int i = 0; i < 4; i++) row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            FrameworkElement[] controls = [_query, _count, _previous, _next, close];
-            for (int i = 0; i < controls.Length; i++)
+            var navigation = new StackPanel
             {
-                Grid.SetColumn(controls[i], i);
-                row.Children.Add(controls[i]);
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Spacing = 3,
+            };
+            navigation.Children.Add(_count);
+            foreach (Button button in new[] { _previous, _next, close })
+            {
+                button.MinWidth = 24;
+                button.Padding = new Thickness(4, 2, 4, 2);
+                navigation.Children.Add(button);
             }
+            _count.FontSize = 12;
+            _count.MaxWidth = 48;
+            _count.TextTrimming = TextTrimming.CharacterEllipsis;
+
+            Grid row = new() { ColumnSpacing = 4, RowSpacing = 3, Margin = new Thickness(4, 2, 4, 4) };
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            row.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            row.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            row.Children.Add(_query);
+            row.Children.Add(navigation);
+
+            void ArrangeFindControls(double width)
+            {
+                bool narrow = width < GuideAppearance.SingleLineFindWidth;
+                Grid.SetColumnSpan(_query, narrow ? 2 : 1);
+                Grid.SetColumnSpan(navigation, narrow ? 2 : 1);
+                Grid.SetColumn(navigation, narrow ? 0 : 1);
+                Grid.SetRow(navigation, narrow ? 1 : 0);
+            }
+            ArrangeFindControls(_findHost.ActualWidth);
+            row.SizeChanged += (_, args) => ArrangeFindControls(args.NewSize.Width);
             _findHost.Children.Add(row);
         }
         _findHost.Visibility = Visibility.Visible;
         _query.Focus(FocusState.Programmatic);
         _query.SelectAll();
     }
+
+    internal void SetFontSize(int fontSize)
+    {
+        if (Body.FontSize == fontSize) return;
+        SavePosition();
+        Body.FontSize = fontSize;
+        Body.LineHeight = LineHeightFor(fontSize);
+        if (Body.IsLoaded) QueueRestorePosition();
+    }
+
+    private static double LineHeightFor(int fontSize) => fontSize * (20.0 / GuideAppearance.DefaultFontSize);
 
     internal void SavePosition()
     {
@@ -110,8 +148,16 @@ internal sealed class GuideReader
     private void OnLoaded(object sender, RoutedEventArgs args)
     {
         Body.Loaded -= OnLoaded;
-        Body.DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        QueueRestorePosition();
+    }
+
+    private void QueueRestorePosition()
+    {
+        if (_restoreQueued) return;
+        _ready = false;
+        _restoreQueued = Body.DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
         {
+            _restoreQueued = false;
             if (Body.XamlRoot is null) return;
             double y = 0;
             if (_bookmark is { } bookmark)

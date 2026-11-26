@@ -17,6 +17,7 @@ namespace PotatoVN.App.PluginBase;
 public partial class Plugin
 {
     private readonly GuidePageClient _guidePages = new();
+    private readonly ExternalGuidePage _externalGuidePage = new();
     private readonly Df2anGuideSource _df2an;
     private readonly YmgalGuideSource _ymgal;
     private readonly CngalGuideSource _cngal;
@@ -25,18 +26,27 @@ public partial class Plugin
 
     private sealed record PanelSnapshot(string StatusText, string? OpenSiteUrl, GuideSource Source, UIElement[] Children);
 
-    private sealed class PanelState(Window window, StackPanel content, TextBlock status, ScrollViewer scroll, Grid findHost)
+    private sealed class PanelState(Window window, Galgame game, StackPanel content, TextBlock status, ScrollViewer scroll, Grid findHost)
     {
         public Window Window { get; } = window;
+        public Galgame Game { get; } = game;
         public StackPanel Content { get; } = content;
         public TextBlock Status { get; } = status;
         public ScrollViewer Scroll { get; } = scroll;
         public Grid FindHost { get; } = findHost;
         public GuideReader? Reader;
         public FloatingWindowPin? WindowPin;
+        public FloatingWindowDock? WindowDock;
+        public Action? RememberWindowPlacement;
+        public Action? ShowFirstUseHelp;
+        public Action? HideGuideHelp;
+        public bool IsGuideHelpOpen;
+        public bool IsPickingLocalFile;
+        public FloatingWindowOpacity WindowOpacity { get; } = new(window);
         public GuideSource? PreferredSource;
         public GuideSource CurrentSource;
-        public Guid? ActiveSavedLink;
+        public GuideResume? ActiveReading;
+        public bool ResumedOnOpen;
         public string? OpenSiteUrl;
         public Button? SiteButton;
         public Button? LocalFileButton;
@@ -47,21 +57,24 @@ public partial class Plugin
         public Button? CompactBackButton;
         public Button? BarBackButton;
         public CancellationTokenSource? RequestCancellation;
-        public bool CompactMode;
+        public bool ShowHeaderReadingActions;
         public Stack<PanelSnapshot> BackStack { get; } = [];
     }
 
-    private FrameworkElement BuildGuidePanel(Window window, Guid gameId, out PanelState state)
+    private FrameworkElement BuildGuidePanel(Window window, Galgame game, out PanelState state)
     {
         TextBlock status = new() { TextWrapping = TextWrapping.Wrap, FontSize = 12, Foreground = GetSecondaryBrush() };
         StackPanel content = new() { Spacing = 4 };
-        ScrollViewer scroll = new() { Content = content, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+        ScrollViewer scroll = new()
+        {
+            Content = content,
+            HorizontalScrollMode = ScrollMode.Disabled,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+        };
         Grid findHost = new() { Visibility = Visibility.Collapsed };
 
-        var panel = new PanelState(window, content, status, scroll, findHost)
-        {
-            PreferredSource = GuideSearch.InitialSource(Data.DefaultSource, Data.LocalGuides.ContainsKey(gameId)),
-        };
+        var panel = new PanelState(window, game, content, status, scroll, findHost);
         state = panel;
 
         Grid root = new()
@@ -85,7 +98,7 @@ public partial class Plugin
         var find = new KeyboardAccelerator { Key = VirtualKey.F, Modifiers = VirtualKeyModifiers.Control };
         find.Invoked += (_, args) =>
         {
-            if (panel.Reader is not { } reader) return;
+            if (panel.IsGuideHelpOpen || panel.Reader is not { } reader) return;
             reader.OpenFind();
             args.Handled = true;
         };
@@ -93,52 +106,26 @@ public partial class Plugin
         return root;
     }
 
-    private Task ShowSourceAsync(Galgame game, PanelState state)
+    private Task ShowSourceAsync(Galgame game, PanelState state, bool openMounted = false)
     {
         CancelPanelRequest(state);
         ResetReader(state);
         state.BackStack.Clear();
+        state.ResumedOnOpen = false;
         UpdateBackButtons(state);
         UpdateSourceToggleState(state);
 
-        state.ActiveSavedLink = null;
         if (state.PreferredSource == GuideSource.Local)
-            return ShowLocalAsync(game, state, resume: true);
+            return ShowLocalAsync(game, state, resume: openMounted);
         if (state.PreferredSource == GuideSource.SavedLinks)
-            return ShowSavedLinks(game, state);
+            return ShowCustomGuides(game, state);
 
         GuideGame names = DescribeGame(game);
         if (state.PreferredSource is not { } source)
             return ShowAggregatedGuidesAsync(game, names, state);
 
         state.CurrentSource = source;
-        Data.ReadingHistory.TryGetValue(game.Uuid, out GameGuideHistory? history);
-        if (history?.Get(source) is not { } reading)
-            return SearchSingleSiteAsync(game, names, source, state);
-
-        ShowSavedActions(game, names, state, reading);
-        PushBack(state);
-        return OpenArticleAsync(game, state, reading.Article, reading.Title);
-    }
-
-    private void ShowSavedActions(Galgame game, GuideGame names, PanelState state, GuideReading reading)
-    {
-        state.Content.Children.Clear();
-        SetOpenSite(state, null);
-        state.Status.Visibility = Visibility.Visible;
-        state.Status.Text = string.IsNullOrWhiteSpace(reading.Title)
-            ? "此游戏有阅读记录。"
-            : $"上次阅读：{reading.Title}";
-        AddResultRow(state.Content, 0, "打开上次读的攻略", () =>
-        {
-            PushBack(state);
-            return OpenArticleAsync(game, state, reading.Article, reading.Title);
-        });
-        AddResultRow(state.Content, 0, "重新查找攻略", () =>
-        {
-            PushBack(state);
-            return SearchSingleSiteAsync(game, names, reading.Article.Source, state);
-        });
+        return SearchSingleSiteAsync(game, names, source, state);
     }
 
     private Task SearchSingleSiteAsync(Galgame game, GuideGame names, GuideSource source, PanelState state) =>
@@ -219,13 +206,18 @@ public partial class Plugin
         }
     }
 
-    private Task OpenArticleAsync(Galgame game, PanelState state, GuideReference reference, string? title)
+    private Task OpenArticleAsync(Galgame game, PanelState state, GuideReference reference, string? title,
+        CachedGuideText? cached = null)
     {
         state.CurrentSource = reference.Source;
         return RunPanelLoadAsync(state, $"正在打开{SourceName(reference.Source)}正文…", async token =>
         {
+            GuideResume reading = GuideResume.Online(reference);
+            state.ActiveReading = reading;
             string titleOrFallback = string.IsNullOrWhiteSpace(title) ? $"{SourceName(reference.Source)}攻略" : title;
-            var result = await ReadOnlineArticleAsync(reference, titleOrFallback, token);
+            var result = cached is { IsValid: true }
+                ? new GuideResult<GuideArticle>(cached.ToArticle(), GuideIssue.None, cached.GetOriginal())
+                : await ReadOnlineArticleAsync(reference, titleOrFallback, token);
             if (!IsCurrentPanelRequest(state, token)) return;
             SetOpenSite(state, result.BrowserUrl?.AbsoluteUri);
             if (result.Value is not { } article)
@@ -246,7 +238,10 @@ public partial class Plugin
             });
 
             GuideHistory.Remember(Data.ReadingHistory, game.Uuid, new GuideReading(reference, article.Title, bookmark));
-            SaveData();
+            RememberReading(game.Uuid, reading with
+            {
+                Cached = cached is { IsValid: true } ? cached : CachedGuideText.Create(article, result.BrowserUrl),
+            });
         });
     }
 
@@ -261,7 +256,7 @@ public partial class Plugin
             _ => throw new ArgumentOutOfRangeException(nameof(reference)),
         };
 
-    private static void PresentOnlineArticle(PanelState state, GuideArticle article, Uri? original,
+    private void PresentOnlineArticle(PanelState state, GuideArticle article, Uri? original,
         GuideBookmark? bookmark, Action<GuideBookmark> remember)
     {
         PresentArticle(state, article.Text, bookmark, remember);
@@ -270,9 +265,9 @@ public partial class Plugin
                 () => OpenGuideInBrowserAsync(original.AbsoluteUri));
     }
 
-    private static void PresentArticle(PanelState state, string text, GuideBookmark? bookmark, Action<GuideBookmark> remember)
+    private void PresentArticle(PanelState state, string text, GuideBookmark? bookmark, Action<GuideBookmark> remember)
     {
-        GuideReader reader = new(text, bookmark, state.Scroll, state.FindHost, remember);
+        GuideReader reader = new(text, bookmark, state.Scroll, state.FindHost, remember, Data.ReaderFontSize);
         state.Content.Children.Add(reader.Body);
         state.Reader = reader;
         state.Status.Visibility = Visibility.Collapsed;
@@ -294,7 +289,7 @@ public partial class Plugin
         UpdateProgress(state, true);
         try
         {
-            await load(token);
+            await _guidePages.RunForGameAsync(state.Game.Uuid, () => load(token));
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
         catch (Exception error)
@@ -323,6 +318,7 @@ public partial class Plugin
     {
         state.Reader?.SavePosition();
         state.Reader = null;
+        state.ActiveReading = null;
         state.FindHost.Children.Clear();
         state.FindHost.Visibility = Visibility.Collapsed;
         UpdateFindButton(state);
@@ -345,7 +341,6 @@ public partial class Plugin
         state.Status.Text = snapshot.StatusText;
         state.Status.Visibility = Visibility.Visible;
         state.CurrentSource = snapshot.Source;
-        state.ActiveSavedLink = null;
         SetOpenSite(state, snapshot.OpenSiteUrl);
         UpdateBackButtons(state);
         UpdateProgress(state, false);
@@ -359,10 +354,10 @@ public partial class Plugin
 
     private static void UpdateBackButtons(PanelState state)
     {
-        bool canGoBack = state.BackStack.Count > 0;
+        bool canGoBack = state.ResumedOnOpen || state.BackStack.Count > 0;
         if (state.BarBackButton is not null) state.BarBackButton.IsEnabled = canGoBack;
         if (state.CompactBackButton is not null)
-            state.CompactBackButton.Visibility = state.CompactMode && canGoBack ? Visibility.Visible : Visibility.Collapsed;
+            state.CompactBackButton.Visibility = state.ShowHeaderReadingActions && canGoBack ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private static void UpdateFindButton(PanelState state)
@@ -370,7 +365,7 @@ public partial class Plugin
         bool canFind = state.Reader is not null;
         if (state.FindButton is not null) state.FindButton.IsEnabled = canFind;
         if (state.CompactFindButton is not null)
-            state.CompactFindButton.Visibility = state.CompactMode && canFind ? Visibility.Visible : Visibility.Collapsed;
+            state.CompactFindButton.Visibility = state.ShowHeaderReadingActions && canFind ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private static void UpdateProgress(PanelState state, bool loading)

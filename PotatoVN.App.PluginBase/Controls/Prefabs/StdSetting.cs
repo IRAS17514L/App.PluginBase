@@ -1,39 +1,35 @@
-﻿using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 
 namespace PotatoVN.App.PluginBase.Controls.Prefabs
 {
-    public sealed class StdSetting : UserControl
+    internal sealed class StdSetting
     {
-        public string Title
-        {
-            get => _titleText.Text;
-            set => _titleText.Text = value;
-        }
+        public Grid View { get; }
+
         public string Description
         {
             get => _descriptionText.Text;
             set => _descriptionText.Text = value;
         }
         
-        private readonly TextBlock _titleText;
         private readonly TextBlock _descriptionText;
         
         public StdSetting(string title, string description, FrameworkElement rightContent)
         {
             rightContent.HorizontalAlignment = HorizontalAlignment.Right;
 
-            _titleText = new TextBlock { Text = title };
+            var titleText = new TextBlock { Text = title };
             _descriptionText = new TextBlock
             {
                 Text = description,
                 TextWrapping = TextWrapping.Wrap
             };
-            TryApplyStyle(_titleText, "BodyTextBlockStyle");
+            TryApplyStyle(titleText, "BodyTextBlockStyle");
             TryApplyStyle(_descriptionText, "DescriptionTextStyle");
 
             var leftStack = new StackPanel { Orientation = Orientation.Vertical };
-            leftStack.Children.Add(_titleText);
+            leftStack.Children.Add(titleText);
             leftStack.Children.Add(_descriptionText);
 
             var root = new Grid();
@@ -52,7 +48,7 @@ namespace PotatoVN.App.PluginBase.Controls.Prefabs
             root.Children.Add(rightContent);
             Grid.SetColumn(rightContent, 2);
 
-            Content = root;
+            View = root;
         }
         
         private static void TryApplyStyle(FrameworkElement fe, string key)

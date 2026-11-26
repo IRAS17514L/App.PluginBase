@@ -20,19 +20,40 @@ internal sealed class GuidePageClient(HttpClient? client = null)
     private static readonly Regex MetaCharset = new(@"<meta\b[^>]*\bcharset\s*=\s*[""']?\s*(?<name>[\w-]+)",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
     private readonly HttpClient _http = client ?? DefaultHttp;
-    private readonly ConcurrentDictionary<Uri, CachedPage> _pages = new();
+    private readonly AsyncLocal<Guid> _gameScope = new();
+    private readonly object _cacheGate = new();
+    private readonly ConcurrentDictionary<(Guid GameId, Uri Url), CachedPage> _pages = new();
 
     private sealed record CachedPage(string Html, DateTimeOffset ExpiresAt);
     private const int MaxCachedPages = 32;
     private const int MaxCachedPageLength = 1024 * 1024;
     private const int MaxResponseLength = 5 * 1024 * 1024;
 
-    internal void Clear() => _pages.Clear();
+    internal async Task RunForGameAsync(Guid gameId, Func<Task> load)
+    {
+        Guid previous = _gameScope.Value;
+        _gameScope.Value = gameId;
+        try { await load(); }
+        finally { _gameScope.Value = previous; }
+    }
+
+    internal Guid[] GetCachedGameIds() =>
+        _pages.Keys.Select(key => key.GameId).Where(gameId => gameId != Guid.Empty).Distinct().ToArray();
+
+    internal void Clear(Guid gameId)
+    {
+        lock (_cacheGate)
+        {
+            foreach (var key in _pages.Keys.Where(key => key.GameId == gameId))
+                _pages.TryRemove(key, out _);
+        }
+    }
 
     internal async Task<string> GetAsync(Uri url, CancellationToken token, Encoding? fallbackEncoding = null)
     {
         token.ThrowIfCancellationRequested();
-        if (_pages.TryGetValue(url, out CachedPage? cached) && cached.ExpiresAt > DateTimeOffset.UtcNow)
+        var key = (_gameScope.Value, url);
+        if (_pages.TryGetValue(key, out CachedPage? cached) && cached.ExpiresAt > DateTimeOffset.UtcNow)
             return cached.Html;
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
@@ -42,25 +63,7 @@ internal sealed class GuidePageClient(HttpClient? client = null)
         {
             using var response = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
             response.EnsureSuccessStatusCode();
-            if (response.Content.Headers.ContentLength is > MaxResponseLength)
-                throw new HttpRequestException("响应内容过大");
-
-            await using Stream source = await response.Content.ReadAsStreamAsync(timeout.Token);
-            using var buffer = new MemoryStream();
-            var chunk = new byte[81920];
-            while (true)
-            {
-                int read = await source.ReadAsync(chunk, timeout.Token);
-                if (read == 0) break;
-                if (buffer.Length + read > MaxResponseLength) throw new HttpRequestException("响应内容过大");
-                buffer.Write(chunk, 0, read);
-            }
-
-            timeout.Token.ThrowIfCancellationRequested();
-            var payload = buffer.GetBuffer();
-            int length = checked((int)buffer.Length);
-            Encoding encoding = ReadEncoding(response.Content, payload, length, fallbackEncoding);
-            html = encoding.GetString(payload, 0, length);
+            html = await ReadTextAsync(response.Content, timeout.Token, fallbackEncoding);
         }
         catch (OperationCanceledException error) when (!token.IsCancellationRequested && timeout.IsCancellationRequested)
         {
@@ -70,12 +73,41 @@ internal sealed class GuidePageClient(HttpClient? client = null)
         token.ThrowIfCancellationRequested();
         if (html.Length <= MaxCachedPageLength)
         {
-            _pages[url] = new CachedPage(html, DateTimeOffset.UtcNow.AddMinutes(10));
-            foreach (Uri expired in _pages.OrderBy(pair => pair.Value.ExpiresAt)
-                         .Take(Math.Max(0, _pages.Count - MaxCachedPages)).Select(pair => pair.Key))
-                _pages.TryRemove(expired, out _);
+            lock (_cacheGate)
+            {
+                token.ThrowIfCancellationRequested();
+                _pages[key] = new CachedPage(html, DateTimeOffset.UtcNow.AddMinutes(10));
+                foreach (var expired in _pages.OrderBy(pair => pair.Value.ExpiresAt)
+                             .Take(Math.Max(0, _pages.Count - MaxCachedPages)).Select(pair => pair.Key))
+                    _pages.TryRemove(expired, out _);
+            }
         }
         return html;
+    }
+
+    internal static async Task<string> ReadTextAsync(HttpContent content, CancellationToken token,
+        Encoding? fallbackEncoding, int maxBytes = MaxResponseLength)
+    {
+        if (content.Headers.ContentLength > maxBytes)
+            throw new HttpRequestException("响应内容过大");
+
+        await using Stream source = await content.ReadAsStreamAsync(token).ConfigureAwait(false);
+        using var buffer = new MemoryStream();
+        var chunk = new byte[81920];
+        while (true)
+        {
+            int read = await source.ReadAsync(chunk, token).ConfigureAwait(false);
+            if (read == 0) break;
+            if (buffer.Length + read > maxBytes) throw new HttpRequestException("响应内容过大");
+            buffer.Write(chunk, 0, read);
+        }
+
+        token.ThrowIfCancellationRequested();
+        int length = checked((int)buffer.Length);
+        Encoding encoding = ReadEncoding(content, buffer.GetBuffer(), length, fallbackEncoding);
+        buffer.Position = 0;
+        using var reader = new StreamReader(buffer, encoding, detectEncodingFromByteOrderMarks: true);
+        return await reader.ReadToEndAsync(token).ConfigureAwait(false);
     }
 
     internal async Task<GuideConnection> ProbeEndpointsAsync(IReadOnlyList<Uri> endpoints, CancellationToken token)

@@ -25,6 +25,9 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Seiya resolves original titles and platform variants from Shift-JIS catalogs", SeiyaAsync),
     ("Seiya covers all-ages PC and kana-annotated console titles", SeiyaPlatformTitlesAsync),
     ("Saved web links route supported articles and Steam needs an App ID", () => RunSync(WebLinks)),
+    ("External HTML keeps guide paragraphs and drops navigation", ExternalHtmlAsync),
+    ("External guides follow public redirects and reject unsuitable pages", ExternalFallbackAsync),
+    ("Pasted guide text round-trips with independent reading progress", () => RunSync(SavedText)),
     ("Article ID remains usable after mirror change", MirrorAsync),
     ("Legacy links, independent sources, and JSON round trip", () => RunSync(History)),
     ("Paragraph bookmarks survive insertions and find ignores case", () => RunSync(Bookmarks)),
@@ -33,6 +36,11 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Local reader rejects binary, empty and oversized input", InvalidLocalFilesAsync),
     ("Caller cancellation interrupts the response body", CancelBodyAsync),
     ("Stalled response body times out", TimeoutBodyAsync),
+    ("Dock tab stays inside the current display work area for all edges", () => RunSync(DockLayout)),
+    ("Floating placement survives DPI, workspace and monitor changes", () => RunSync(WindowPlacement)),
+    ("Compact and detailed windows restore independent sizes", () => RunSync(WindowModeSizes)),
+    ("Last guide migrates and cached text survives JSON round trip with bounded storage", () => RunSync(ResumeCache)),
+    ("Clearing a game's page cache preserves other games", ScopedPageCacheAsync),
 };
 await Task.WhenAll(tests.Select(async test =>
 {
@@ -566,9 +574,86 @@ static void WebLinks()
         GuideWebLinks.ReaderReference(SeiyaGuideSource.AllAges) is null &&
         GuideWebLinks.ReaderReference(SeiyaGuideSource.AllAgesPc) is null,
         "Route trusted article URLs to their readers without handling arbitrary URLs or index links.");
-    var saved = new SavedGuideLink(Guid.NewGuid(), mirror.AbsoluteUri, "全路线", new GuideBookmark("route", 4, 0.2));
-    Check(JsonSerializer.Deserialize<SavedGuideLink[]>(JsonSerializer.Serialize(new[] { saved })) is [var restored] &&
+    var saved = new SavedGuide(Guid.NewGuid(), mirror.AbsoluteUri, "全路线", new GuideBookmark("route", 4, 0.2));
+    Check(JsonSerializer.Deserialize<SavedGuide[]>(JsonSerializer.Serialize(new[] { saved })) is [var restored] &&
         restored == saved, "Saved links retain title, URL, ID and reading progress.");
+}
+
+static async Task ExternalHtmlAsync()
+{
+    const string html = """
+        <!doctype html><title>全路线攻略</title>
+        <header>站点标题</header><nav>全部游戏</nav>
+        <main><article><div class="entry-content">
+          <h2>共同线</h2><p>第一章在车站等候。<br>确认后保存。</p>
+          <ol><li>路线 A：先找 <a href="/character">小明</a>。</li><li>路线 B：前往车站。</li></ol>
+          <aside>相关推荐</aside><script>不应显示()</script><p aria-hidden="true">隐藏文字</p>
+        </div><div class="comments">评论内容</div></article></main>
+        <footer>联系站长</footer>
+        """;
+    using var http = new HttpClient(new Handler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+    {
+        Content = new StringContent(html, Encoding.UTF8, "text/html"),
+    }));
+    var page = new ExternalGuidePage(http);
+    var result = await page.ReadAsync(new Uri("https://example.invalid/guide"), "网页攻略", default);
+    Check(result.Value?.Title == "全路线攻略" &&
+        result.Value.Text == "共同线\n第一章在车站等候。\n确认后保存。\n路线 A：先找 小明。\n路线 B：前往车站。",
+        "The external parser should keep body structure and exclude unrelated controls.");
+}
+
+static async Task ExternalFallbackAsync()
+{
+    var requested = new List<Uri>();
+    using var http = new HttpClient(new Handler(url =>
+    {
+        requested.Add(url);
+        return url.AbsolutePath switch
+        {
+            "/redirect" => new HttpResponseMessage(HttpStatusCode.Found)
+                { Headers = { Location = new Uri("/text", UriKind.Relative) } },
+            "/private" => new HttpResponseMessage(HttpStatusCode.Found)
+                { Headers = { Location = new Uri("http://127.0.0.1/guide") } },
+            "/text" => new HttpResponseMessage(HttpStatusCode.OK)
+                { Content = new StringContent("路线一\r\n到车站，再保存。", Encoding.Unicode, "text/plain") },
+            "/pdf" => new HttpResponseMessage(HttpStatusCode.OK)
+                { Content = new StringContent("%PDF-1.7", Encoding.UTF8, "application/pdf") },
+            "/image" => new HttpResponseMessage(HttpStatusCode.OK)
+                { Content = new StringContent("<article><h1>路线攻略</h1><img src='route.png'></article>", Encoding.UTF8, "text/html") },
+            _ => new HttpResponseMessage(HttpStatusCode.OK)
+                { Content = new StringContent("<main><script>loadGuide()</script></main>", Encoding.UTF8, "text/html") },
+        };
+    }));
+    var page = new ExternalGuidePage(http);
+    var baseUrl = new Uri("http://example.invalid/");
+    var text = await page.ReadAsync(new Uri(baseUrl, "redirect"), "短攻略", default);
+    Check(text.Value?.Text == "路线一\n到车站，再保存。" && text.BrowserUrl == new Uri(baseUrl, "redirect"),
+        "A relative redirect should decode plain text and preserve the original browser address.");
+    foreach (string path in new[] { "pdf", "empty", "image", "private" })
+    {
+        var address = new Uri(baseUrl, path);
+        var result = await page.ReadAsync(address, "网页攻略", default);
+        Check(result.Value is null && result.BrowserUrl == address, $"Expected browser fallback for {path}.");
+    }
+    Check(requested.All(url => url.Host == baseUrl.Host), "External redirects must not request a local address.");
+}
+
+static void SavedText()
+{
+    var text = new SavedGuide(Guid.NewGuid(), null, "我的攻略", new GuideBookmark("abc", 1, .5),
+        "　第一章\n\n  前往车站。");
+    var legacy = JsonSerializer.Deserialize<SavedGuide>("""
+        {"Id":"07418579-2471-4941-9446-c771eb2b3195","Url":"https://example.invalid/guide","Title":"旧链接"}
+        """);
+    Check(legacy is { IsValid: true, Text: null } && text.IsValid,
+        "Both legacy links and pasted text must be valid saved entries.");
+    Check(JsonSerializer.Deserialize<SavedGuide>(JsonSerializer.Serialize(text)) == text &&
+          !text.HasSameContent(text with { Text = "另一条路线" }) &&
+          text.HasSameContent(text with { Title = "改个标题" }),
+        "Text, whitespace and bookmarks must round-trip without treating different text as the same revision.");
+    Check(!(text with { Text = " \n\t" }).IsValid &&
+          !(text with { Text = new string('字', SavedGuide.MaxTextLength + 1) }).IsValid,
+        "Empty or oversized persisted text must not be opened.");
 }
 
 static async Task MirrorAsync()
@@ -745,6 +830,153 @@ static async Task TimeoutBodyAsync()
         throw new InvalidOperationException("Body read failed to time out.");
     }
     catch (HttpRequestException error) when (error.Message == "请求超时") { }
+}
+
+static void DockLayout()
+{
+    var work = new GuideWindowBounds(-1440, -90, 1440, 840);
+    const int gap = 12;
+    const int thickness = 8;
+    const int length = 81;
+    (GuideDockEdge Edge, GuideWindowBounds Frame, GuideWindowBounds ExpectedTab)[] placements =
+    [
+        (GuideDockEdge.Left, new(-1431, 0, 320, 400), new(-1440, 159, 8, 81)),
+        (GuideDockEdge.Right, new(-325, 50, 320, 400), new(-8, 209, 8, 81)),
+        (GuideDockEdge.Top, new(-800, -87, 320, 400), new(-681, -90, 81, 8)),
+        (GuideDockEdge.Bottom, new(-800, 355, 320, 400), new(-681, 742, 81, 8)),
+    ];
+    foreach (var (edge, frame, tab) in placements)
+    {
+        GuideDockLayout? placement = GuideDockLayout.Find(frame, work, gap, thickness, length);
+        Check(placement is { } dock && dock.Edge == edge && dock.Tab == tab &&
+            dock.Expanded.Width == frame.Width && dock.Expanded.Height == frame.Height &&
+            dock.Expanded.Contains(tab.X, tab.Y),
+            $"Expected {edge} tab within the active screen and unchanged expanded size.");
+
+        var (flatCorner, innerCorner, innerMiddle) = edge switch
+        {
+            GuideDockEdge.Left => ((0, 0), (tab.Width - 1, 0), (tab.Width - 1, tab.Height / 2)),
+            GuideDockEdge.Right => ((tab.Width - 1, 0), (0, 0), (0, tab.Height / 2)),
+            GuideDockEdge.Top => ((0, 0), (0, tab.Height - 1), (tab.Width / 2, tab.Height - 1)),
+            _ => ((0, tab.Height - 1), (0, 0), (tab.Width / 2, 0)),
+        };
+        GuideDockLayout shape = placement!.Value;
+        Check(shape.TabAlphaAt(flatCorner.Item1, flatCorner.Item2) > 240 &&
+            shape.TabAlphaAt(innerCorner.Item1, innerCorner.Item2) == 0 &&
+            shape.TabAlphaAt(innerMiddle.Item1, innerMiddle.Item2) == 255,
+            $"Expected a flat outer edge and inset round corners on {edge}.");
+    }
+
+    var corner = GuideDockLayout.Find(new GuideWindowBounds(-1434, -88, 320, 400), work, gap, 16, 80);
+    Check(corner?.Edge == GuideDockEdge.Top, "A corner uses the closest edge.");
+    var shortWindow = GuideDockLayout.Find(new GuideWindowBounds(-1434, 0, 320, 48), work, gap, 16, 80);
+    Check(shortWindow is { } shortDock && shortDock.Tab.Height == 48 &&
+        shortDock.Expanded.Contains(shortDock.Tab.X, shortDock.Tab.Bottom - 1),
+        "A short tab cannot extend outside the expanded window and retrigger hiding under the pointer.");
+    Check(GuideDockLayout.Find(new GuideWindowBounds(-1390, 100, 320, 400), work, gap, 16, 80) is null,
+        "A window away from all edges stays expanded.");
+    Check(GuideDockLayout.Find(new GuideWindowBounds(10, -850, 320, 400), work, gap, 16, 80) is null,
+        "A window outside the current display does not leave a tab there.");
+}
+
+static void WindowPlacement()
+{
+    var previous = new GuideWindowBounds(-1600, -250, 1600, 1000);
+    var window = new GuideWindowBounds(-400, 250, 400, 500);
+    var placement = GuideWindowPlacement.Capture("SECONDARY", previous, window, 1.0);
+    Check(placement.IsValid && placement.Restore(previous, 1.0) == window,
+        "The same secondary display should give the same window position and size.");
+
+    var changed = new GuideWindowBounds(1920, -180, 1440, 850);
+    var restored = placement.Restore(changed, 1.25);
+    Check(restored.Width == 500 && restored.Height == 625 && restored.Right == changed.Right &&
+          restored.Bottom == changed.Bottom, "Restoring to a different display must scale the window and keep edge alignment.");
+    var centered = GuideWindowPlacement.Center(changed, restored.Width, restored.Height);
+    Check(centered == new GuideWindowBounds(2390, -68, 500, 625),
+        "Reset should center the existing size on the current screen.");
+    var tiny = new GuideWindowBounds(0, 0, 280, 200);
+    Check(placement.Restore(tiny, 2) == tiny && GuideWindowPlacement.Fit(tiny, window) == tiny,
+        "An unplugged display or a smaller workspace should keep the whole window visible.");
+    Check(!(placement with { Horizontal = double.NaN }).IsValid, "Invalid persisted coordinates must be ignored.");
+
+    var screen = new GuideWindowBounds(-1600, -250, 1600, 1000);
+    var work = screen with { Height = 955 };
+    var atTaskbar = new GuideWindowBounds(-1300, 350, 380, 400);
+    var dock = GuideDockLayout.Find(atTaskbar, work, 15, 10, 102, screen);
+    Check(dock is { Edge: GuideDockEdge.Bottom } layout && layout.Tab.Bottom == work.Bottom &&
+           layout.Expanded.Bottom == work.Bottom, "The physical secondary edge can dock without covering its taskbar.");
+}
+
+static void WindowModeSizes()
+{
+    var compact = new GuideWindowSize(267, 462);
+    var initialDetailed = GuideAppearance.SizeForModeSwitch(compact: false, saved: null, current: compact);
+    Check(initialDetailed == new GuideWindowSize(550, 462),
+        "The first switch to detailed mode widens a narrow window while retaining its height.");
+    var detailed = new GuideWindowSize(740, 580);
+    Check(GuideAppearance.SizeForModeSwitch(compact: true, saved: compact, current: detailed) == compact,
+        "Returning to compact mode restores the size before expansion.");
+    Check(GuideAppearance.SizeForModeSwitch(compact: false, saved: detailed, current: compact) == detailed,
+        "Returning to detailed mode restores its separate size.");
+    Check(GuideAppearance.SizeForModeSwitch(compact: true, saved: null, current: detailed) == new GuideWindowSize(320, 420),
+        "With no saved compact size, use the initial compact size.");
+    Check(!(detailed with { Height = double.NaN }).IsValid, "Invalid stored sizes must be ignored.");
+
+    var work = new GuideWindowBounds(-1600, 0, 1600, 1000);
+    var lastPlacement = new GuideWindowPlacement("SECONDARY", 1, 1, detailed.Width, detailed.Height);
+    var restored = lastPlacement.Restore(work, 1.5, compact);
+    Check((restored.Width, restored.Height) == compact.ToPixels(1.5) &&
+          restored.Right == work.Right && restored.Bottom == work.Bottom,
+        "Restore the selected mode size at the most recent position on a scaled display.");
+    Check(JsonSerializer.Deserialize<GuideWindowSize>(JsonSerializer.Serialize(compact)) == compact,
+        "A saved mode size survives serialization.");
+}
+
+static void ResumeCache()
+{
+    Guid first = Guid.NewGuid(), second = Guid.NewGuid(), third = Guid.NewGuid();
+    var article = new GuideReference(GuideSource.Df2an, "42");
+    var prior = new GameGuideHistory(new GuideReading(article, "攻略"), null, GuideSource.Df2an);
+    var saved = new SavedGuide(Guid.NewGuid(), "https://example.invalid/guide", "我的攻略",
+        new GuideBookmark("路线", 2, 0.3));
+    Check(GuideResume.FromLegacy(prior, null, [saved])?.Article == article &&
+          GuideResume.FromLegacy(null, null, [saved])?.SavedId == saved.Id,
+        "Expected migration of an existing online choice or one known saved reading.");
+    var oldest = CachedGuideText.Create(new GuideArticle("路线", new string('字', 200_000)), null)!;
+    var cache = new ConcurrentDictionary<Guid, GuideResume>();
+    cache[first] = GuideResume.Online(article) with { Cached = oldest };
+    cache[second] = GuideResume.Saved(saved) with { Cached = oldest with { CachedAt = oldest.CachedAt.AddSeconds(1) } };
+    cache[third] = GuideResume.Online(article) with { Cached = oldest with { CachedAt = oldest.CachedAt.AddSeconds(2) } };
+    Check(CachedGuideText.Trim(cache) && cache[first].Cached is null && cache[first].Article == article &&
+        cache[second].Cached is not null && cache[third].Cached is not null,
+        "Eviction should remove old text while preserving the reading target.");
+    var reloaded = JsonSerializer.Deserialize<ConcurrentDictionary<Guid, GuideResume>>(JsonSerializer.Serialize(cache));
+    Check(reloaded?[second] == cache[second] && reloaded[second].Cached?.ToArticle().Text.Length == 200_000,
+        "Expected a saved guide ID, exact text and cache metadata after a restart.");
+}
+
+static async Task ScopedPageCacheAsync()
+{
+    int fetches = 0;
+    using var http = new HttpClient(new Handler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+    {
+        Content = new StringContent($"fetch-{++fetches}"),
+    }));
+    var pages = new GuidePageClient(http);
+    var address = new Uri("https://example.invalid/guide");
+    Guid first = Guid.NewGuid(), second = Guid.NewGuid();
+    Check(await Read(first) == "fetch-1" && await Read(second) == "fetch-2" && await Read(first) == "fetch-1",
+        "Page caches should be isolated per game even for the same URL.");
+    pages.Clear(first);
+    Check(await Read(second) == "fetch-2" && await Read(first) == "fetch-3",
+        "Only the cleared game should request a fresh page.");
+
+    async Task<string> Read(Guid gameId)
+    {
+        string value = "";
+        await pages.RunForGameAsync(gameId, async () => value = await pages.GetAsync(address, default));
+        return value;
+    }
 }
 
 static HttpResponseMessage Fixture(string filename) => new(HttpStatusCode.OK)

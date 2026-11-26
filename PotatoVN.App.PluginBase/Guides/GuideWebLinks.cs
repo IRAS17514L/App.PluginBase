@@ -3,7 +3,19 @@ using System.Collections.Generic;
 
 namespace PotatoVN.App.PluginBase.Guides;
 
-public sealed record SavedGuideLink(Guid Id, string Url, string Title, GuideBookmark? Bookmark = null);
+public sealed record SavedGuide(Guid Id, string? Url, string Title, GuideBookmark? Bookmark = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    string? Text = null)
+{
+    internal const int MaxTextLength = 250_000;
+    internal const int MaxTotalTextLength = 1_000_000;
+
+    internal bool IsValid => Id != Guid.Empty && (Text is null
+        ? GuideWebLinks.TryParse(Url, out _)
+        : Text.Length <= MaxTextLength && !string.IsNullOrWhiteSpace(Text));
+
+    internal bool HasSameContent(SavedGuide other) => Id == other.Id && Url == other.Url && Text == other.Text;
+}
 
 internal static class GuideWebLinks
 {
